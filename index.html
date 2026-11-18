@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Neovim · unkernel</title>
+    <link
+      rel="preload"
+      href="/fonts/SymbolsNerdFontMono-Regular.ttf"
+      as="font"
+      type="font/ttf"
+      crossorigin
+    />
+  </head>
+  <body>
+    <!-- Fullscreen 100vw x 100vh WebGL2 Terminal Stage -->
+    <main id="terminal-stage" aria-label="Neovim Terminal Canvas"></main>
+
+    <!-- Minimal Boot Overlay (fades out automatically once Neovim renders) -->
+    <div id="boot-overlay" class="boot-overlay">
+      <div class="boot-card">
+        <div class="boot-header">
+          <span class="boot-dot"></span>
+          <span class="boot-brand">unkernel · Neovim 0.12</span>
+          <span class="boot-badge" id="boot-mode-badge">riscv64 · JIT</span>
+        </div>
+        <div class="boot-title" id="boot-title">正在初始化运行环境…</div>
+        <div class="boot-detail" id="boot-detail">Alpine Linux 3.24 · DefectingCat/nvim</div>
+        <div class="boot-bar-track">
+          <div class="boot-bar-fill" id="boot-bar-fill"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Subtle Floating Trigger Pill (bottom-right, auto-fades to 0.22 opacity) -->
+    <button
+      id="menu-pill"
+      class="menu-pill"
+      type="button"
+      title="打开控制中心 (Ctrl+Shift+P / ⌘+Shift+P)"
+    >
+      <span class="pill-dot" id="pill-dot"></span>
+      <span class="pill-label" id="pill-label">nvim</span>
+      <kbd class="pill-kbd" id="pill-kbd">⌘⇧P</kbd>
+    </button>
+
+    <!-- Modal Control Center (hidden by default) -->
+    <div id="modal-backdrop" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="modal-dialog" id="modal-dialog"></div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
