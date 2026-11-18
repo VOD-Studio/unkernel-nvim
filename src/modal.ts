@@ -163,7 +163,7 @@ export class ModalController {
           </div>
         </div>
         <div class="row-bar">
-          <span class="row-label">右下角悬浮快捷胶囊</span>
+          <span class="row-label">右上角悬浮快捷胶囊</span>
           <div class="row-controls">
             <button class="mini-btn" id="btn-toggle-pill" type="button">
               ${this.#pillHidden ? "当前隐藏 (点击显示)" : "当前显示 (点击隐藏)"}

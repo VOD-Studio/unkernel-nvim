@@ -177,6 +177,19 @@ export class CanvasTerminal {
         this.#enableWebgl();
       });
       this.term.loadAddon(webgl);
+      // Fix @xterm/addon-webgl initialization order & ResizeObserver canvas/gl.viewport desync on HiDPI:
+      // 1) _initializeWebGLState calls handleResize before _glyphRenderer.value is assigned;
+      // 2) _observerDisposable mutates canvas.width/height without updating gl.viewport or u_resolution.
+      const renderer = (
+        webgl as unknown as {
+          _renderer?: {
+            _observerDisposable?: { clear?: () => void };
+            handleResize?: (cols: number, rows: number) => void;
+          };
+        }
+      )._renderer;
+      renderer?._observerDisposable?.clear?.();
+      renderer?.handleResize?.(this.term.cols, this.term.rows);
       this.webglActive = true;
     } catch (err) {
       console.warn("[terminal] WebGL2 renderer unavailable, falling back to default renderer:", err);

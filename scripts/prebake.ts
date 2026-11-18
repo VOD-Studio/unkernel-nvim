@@ -325,7 +325,7 @@ EOF
 /nvim-pack-lock.json
 EOF
 
-      # Install PUC-Rio Lua 5.1 _G.load compatibility shim for vim.loader bytecode cache on riscv64
+      # Install PUC-Rio Lua 5.1 compatibility shim for vim.loader, debug.traceback & coxpcall on riscv64
       mkdir -p /etc/xdg/nvim /usr/share/nvim
       cat > /usr/share/nvim/sysinit.vim << 'EOF'
 lua << EOLUA
@@ -338,6 +338,24 @@ if not jit then
       return fn, err
     end
     return raw_load(ld, src)
+  end
+
+  local raw_traceback = debug.traceback
+  debug.traceback = function(co, msg, lvl)
+    if type(co) == "thread" then
+      if lvl == nil then return raw_traceback(co, tostring(msg or "")) end
+      return raw_traceback(co, tostring(msg or ""), lvl)
+    end
+    if co == nil and msg == nil and lvl == nil then return raw_traceback() end
+    if msg == nil then return raw_traceback(co ~= nil and tostring(co) or "") end
+    return raw_traceback(tostring(co or ""), lvl or msg)
+  end
+
+  local ok_coxp, coxp = pcall(require, "coxpcall")
+  if ok_coxp and coxp then
+    _G.pcall = coxp.pcall
+    _G.xpcall = coxp.xpcall
+    coroutine.running = coxp.running
   end
 end
 EOLUA

@@ -175,11 +175,11 @@ body {
   }
 }
 
-/* Subtle Bottom-Right Floating Pill */
+/* Subtle Top-Right Floating Pill (avoids overlapping bottom statusline/cmdline) */
 .menu-pill {
   position: fixed;
-  right: 12px;
-  bottom: 10px;
+  right: 14px;
+  top: 10px;
   z-index: 30;
   display: inline-flex;
   align-items: center;
