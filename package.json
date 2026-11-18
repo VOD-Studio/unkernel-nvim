@@ -5,7 +5,7 @@
   "description": "High-performance fullscreen browser Neovim powered by unkernel (Alpine riscv64 + DefectingCat/nvim)",
   "type": "module",
   "scripts": {
-    "prebake": "node scripts/prebake.ts",
+    "prebake": "node --experimental-wasm-jspi scripts/prebake.ts",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview"
