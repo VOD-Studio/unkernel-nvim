@@ -97,7 +97,7 @@ async function fetchTemplateWithProgress(
 ): Promise<Uint8Array> {
   const res = await fetch(url);
   if (!res.ok) {
-    throw new Error(`下载预烘焙镜像失败 (${res.status} ${res.statusText}): 请确认已执行 pnpm prebake 生成 public/nvim-data.kwsparse.gz`);
+    throw new Error(`下载预烘焙镜像失败 (${res.status} ${res.statusText}): 请确认已执行 bun run prebake 生成 public/nvim-data.kwsparse.gz`);
   }
   const totalHeader = res.headers.get("content-length");
   const total = totalHeader ? Number(totalHeader) : null;
@@ -125,6 +125,21 @@ async function fetchTemplateWithProgress(
   return out;
 }
 
+export type NetMode = "builtin" | "custom" | "off";
+
+export function getSameOriginWispUrl(): string {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${location.host}/wisp`;
+}
+
+function loadInitialNetMode(savedCustomUrl: string): NetMode {
+  const stored = localStorage.getItem("unkernel-nvim.netMode");
+  if (stored === "builtin" || stored === "custom" || stored === "off") {
+    return stored;
+  }
+  return savedCustomUrl.trim() ? "custom" : "builtin";
+}
+
 export class VmManager {
   vm: KernelHandle | null = null;
   activePty: Pty | null = null;
@@ -132,7 +147,28 @@ export class VmManager {
   currentCwd = "/workspace";
   mountedFolders: Map<string, MountedFolder> = new Map();
   wispUrl: string = localStorage.getItem("unkernel-nvim.wisp") ?? "";
+  netMode: NetMode = loadInitialNetMode(this.wispUrl);
   seededFromCache = false;
+
+  getEffectiveWispServers(): string[] {
+    if (this.netMode === "off") return [];
+    if (this.netMode === "builtin") return [getSameOriginWispUrl()];
+    return this.wispUrl
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  setNetworkConfig(mode: NetMode, customUrl?: string): void {
+    this.netMode = mode;
+    localStorage.setItem("unkernel-nvim.netMode", mode);
+    if (customUrl !== undefined) {
+      const val = customUrl.trim();
+      this.wispUrl = val;
+      if (val) localStorage.setItem("unkernel-nvim.wisp", val);
+      else localStorage.removeItem("unkernel-nvim.wisp");
+    }
+  }
 
   #onStatus: (s: BootStatusUpdate) => void;
   #onSessionExit?: (mode: "nvim" | "shell", end: PtyEnd) => void;
@@ -192,19 +228,18 @@ export class VmManager {
       mode: "persistent",
     };
 
-    const netSpec: NetSpec | undefined = this.wispUrl.trim()
-      ? {
-          kind: "net",
-          backend: {
-            kind: "wisp",
-            servers: this.wispUrl
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean),
-          },
-          optional: true,
-        }
-      : undefined;
+    const wispServers = this.getEffectiveWispServers();
+    const netSpec: NetSpec | undefined =
+      wispServers.length > 0
+        ? {
+            kind: "net",
+            backend: {
+              kind: "wisp",
+              servers: wispServers,
+            },
+            optional: true,
+          }
+        : undefined;
 
     const onProgress = (p: BootProgress) => {
       if (p.stage === "download") {

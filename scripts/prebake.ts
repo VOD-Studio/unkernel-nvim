@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Build-time prebake script for unkernel-nvim.
-// Runs on Node >= 24 (--experimental-wasm-jspi):
+// Runs on Bun >= 1.4 (native WebAssembly JSPI):
 // 1. Clones DefectingCat/nvim + all 13 vim.pack plugins on the host in parallel;
 // 2. Cross-compiles codediff.nvim's libvscode_diff.so and the 9 non-apk Treesitter
 //    parsers to riscv64-linux-musl using host `zig cc`;

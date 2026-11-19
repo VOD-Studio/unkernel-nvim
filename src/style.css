@@ -427,6 +427,12 @@ body {
   color: var(--clay-bright);
 }
 
+.mini-btn.active {
+  border-color: var(--clay-accent);
+  background-color: var(--clay-accent-dim);
+  color: var(--clay-bright);
+}
+
 .row-bar {
   display: flex;
   align-items: center;

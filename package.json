@@ -4,11 +4,14 @@
   "private": true,
   "description": "High-performance fullscreen browser Neovim powered by unkernel (Alpine riscv64 + DefectingCat/nvim)",
   "type": "module",
+  "packageManager": "bun@1.4.4",
   "scripts": {
-    "prebake": "node --experimental-wasm-jspi scripts/prebake.ts",
-    "dev": "vite",
-    "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "prebake": "bun scripts/prebake.ts",
+    "dev": "bunx --bun vite",
+    "build": "bunx --bun tsc --noEmit && bunx --bun vite build",
+    "preview": "bunx --bun vite preview",
+    "start": "bun server/index.ts",
+    "wisp": "bun server/wisp-server.ts"
   },
   "dependencies": {
     "@xterm/addon-clipboard": "^0.2.0",
@@ -19,7 +22,7 @@
     "unkernel": "0.1.0-261117-0e4b2ec"
   },
   "devDependencies": {
-    "@types/node": "^24.19.2",
+    "@types/bun": "^1.4.4",
     "typescript": "^7.0.2",
     "vite": "^8.3.8"
   }

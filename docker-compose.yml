@@ -1,0 +1,71 @@
+# Public deployment topology:
+#   Browser --(HTTPS / WSS, no login, HttpOnly cookie + Origin + rate limit)--> [app]
+#   [app] --(internal network + server-side Bearer WISP_AUTH_TOKEN)--> [wisp] --> Internet
+#
+# Usage:
+#   1. Copy `.env.example` to `.env` and set a strong `WISP_AUTH_TOKEN`
+#   2. Ensure `public/nvim-data.kwsparse.gz` exists (run `bun run prebake` if needed)
+#   3. `docker compose up -d --build`
+
+services:
+  wisp:
+    build: .
+    command: ["bun", "server/wisp-server.ts"]
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      WISP_PORT: "6680"
+      WISP_PATH: /wisp
+      WISP_AUTH_TOKEN: ${WISP_AUTH_TOKEN:?Set WISP_AUTH_TOKEN in .env}
+      WISP_ALLOWED_HOSTS: ${WISP_ALLOWED_HOSTS:-}
+      WISP_ALLOWED_PORTS: ${WISP_ALLOWED_PORTS:-80,443}
+      WISP_ALLOW_PRIVATE: ${WISP_ALLOW_PRIVATE:-false}
+      WISP_OUTBOUND_PROXY: ${WISP_OUTBOUND_PROXY:-}
+    # Not published to the host network — reachable only from the `app` gateway inside Docker.
+    networks:
+      - wisp_internal
+      - wisp_egress
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:6680/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  app:
+    build: .
+    command: ["bun", "server/index.ts"]
+    restart: unless-stopped
+    depends_on:
+      wisp:
+        condition: service_healthy
+    ports:
+      - "${APP_BIND:-127.0.0.1:3000}:3000"
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "3000"
+      WISP_PATH: /wisp
+      TRUST_PROXY: ${TRUST_PROXY:-true}
+      WISP_UPSTREAM_URL: ws://wisp:6680/wisp
+      WISP_AUTH_TOKEN: ${WISP_AUTH_TOKEN:?Set WISP_AUTH_TOKEN in .env}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-7200}
+      WISP_REQUIRE_SESSION: ${WISP_REQUIRE_SESSION:-true}
+      WISP_ALLOWED_ORIGINS: ${WISP_ALLOWED_ORIGINS:-}
+      WISP_MAX_CONNECTIONS_PER_IP: ${WISP_MAX_CONNECTIONS_PER_IP:-4}
+      WISP_MAX_CONNECTS_PER_MIN_PER_IP: ${WISP_MAX_CONNECTS_PER_MIN_PER_IP:-30}
+    networks:
+      - wisp_internal
+      - app_public
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  wisp_internal:
+    internal: true
+  wisp_egress:
+  app_public:

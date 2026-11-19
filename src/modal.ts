@@ -5,7 +5,15 @@
 
 import { isDirectoryPickerSupported, pickHostDirectory } from "./fs-bridge.ts";
 import type { CanvasTerminal } from "./terminal.ts";
-import type { VmManager } from "./vm-manager.ts";
+import { getSameOriginWispUrl, type NetMode, type VmManager } from "./vm-manager.ts";
+
+function escapeAttr(val: string): string {
+  return val
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
 
 export interface ModalControllerOptions {
   backdrop: HTMLElement;
@@ -216,18 +224,37 @@ export class ModalController {
           </div>
         </div>
         <div class="row-bar">
-          <span class="row-label">Wisp 代理 (可选，供 :PackUpdate 联网)</span>
-          <div class="row-controls" style="flex:1; max-width: 340px;">
-            <input
-              class="text-input"
-              id="input-wisp-url"
-              type="text"
-              placeholder="wss://your-wisp-proxy/"
-              value="${this.#vmManager.wispUrl}"
-            />
-            <button class="mini-btn" id="btn-save-wisp" type="button">保存</button>
+          <span class="row-label">虚拟机联网模式 (Wisp)</span>
+          <div class="row-controls">
+            <button class="mini-btn ${this.#vmManager.netMode === "builtin" ? "active" : ""}" data-net-mode="builtin" type="button">内置代理 (/wisp)</button>
+            <button class="mini-btn ${this.#vmManager.netMode === "custom" ? "active" : ""}" data-net-mode="custom" type="button">自定义</button>
+            <button class="mini-btn ${this.#vmManager.netMode === "off" ? "active" : ""}" data-net-mode="off" type="button">离线</button>
           </div>
         </div>
+        ${
+          this.#vmManager.netMode === "builtin"
+            ? `<div class="row-bar">
+                <span class="row-label">当前代理通道 (免登录同源转发)</span>
+                <div class="row-controls">
+                  <span class="stat-val">${escapeAttr(getSameOriginWispUrl())}</span>
+                </div>
+              </div>`
+            : this.#vmManager.netMode === "custom"
+              ? `<div class="row-bar">
+                  <span class="row-label">自定义 Wisp 地址</span>
+                  <div class="row-controls" style="flex:1; max-width: 340px;">
+                    <input
+                      class="text-input"
+                      id="input-wisp-url"
+                      type="text"
+                      placeholder="wss://your-wisp-proxy/"
+                      value="${escapeAttr(this.#vmManager.wispUrl)}"
+                    />
+                    <button class="mini-btn" id="btn-save-wisp" type="button">保存</button>
+                  </div>
+                </div>`
+              : ""
+        }
       </div>
     `;
 
@@ -355,13 +382,22 @@ export class ModalController {
       await this.#vmManager.resetToFactoryDisk();
     });
 
+    for (const btn of this.#dialog.querySelectorAll<HTMLButtonElement>("[data-net-mode]")) {
+      btn.addEventListener("click", () => {
+        const mode = btn.dataset.netMode as NetMode;
+        if (mode !== "builtin" && mode !== "custom" && mode !== "off") return;
+        this.#vmManager.setNetworkConfig(mode);
+        this.render();
+        const label = mode === "builtin" ? "内置同源代理 (/wisp)" : mode === "custom" ? "自定义 Wisp 代理" : "离线模式";
+        this.#toast(`已切换至${label}，刷新页面后生效`);
+      });
+    }
+
     q("#btn-save-wisp")?.addEventListener("click", () => {
       const input = q<HTMLInputElement>("#input-wisp-url");
       const val = input?.value.trim() ?? "";
-      this.#vmManager.wispUrl = val;
-      if (val) localStorage.setItem("unkernel-nvim.wisp", val);
-      else localStorage.removeItem("unkernel-nvim.wisp");
-      this.#toast("已保存 Wisp 代理地址，刷新页面后生效");
+      this.#vmManager.setNetworkConfig("custom", val);
+      this.#toast("已保存自定义 Wisp 代理地址，刷新页面后生效");
     });
   }
 
