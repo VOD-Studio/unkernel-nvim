@@ -16,7 +16,12 @@ import {
 import type { CanvasTerminal } from "./terminal.ts";
 import { getSameOriginWispUrl, type NetMode, type VmManager } from "./vm-manager.ts";
 
-function escapeAttr(val: string): string {
+const MODAL_TABS = ["workspace", "storage", "system"] as const;
+type ModalTab = (typeof MODAL_TABS)[number];
+type SessionMode = VmManager["currentMode"];
+type DiskAction = "storage" | "restart";
+
+function escapeHtml(val: string): string {
   return val
     .replace(/&/g, "&amp;")
     .replace(/"/g, "&quot;")
@@ -31,6 +36,7 @@ export interface ModalControllerOptions {
   vmManager: VmManager;
   terminal: CanvasTerminal;
   toast: (msg: string) => void;
+  onSessionChange?: (mode: SessionMode) => void;
 }
 
 export class ModalController {
@@ -40,9 +46,13 @@ export class ModalController {
   #vmManager: VmManager;
   #terminal: CanvasTerminal;
   #toast: (msg: string) => void;
+  #onSessionChange?: (mode: SessionMode) => void;
+  #tab: ModalTab = "workspace";
   #open = false;
   #pillHidden = localStorage.getItem("unkernel-nvim.hidePill") === "1";
   #customMemoryOpen = false;
+  #startingSession = false;
+  #diskAction: DiskAction | null = null;
 
   constructor(opts: ModalControllerOptions) {
     this.#backdrop = opts.backdrop;
@@ -51,6 +61,7 @@ export class ModalController {
     this.#vmManager = opts.vmManager;
     this.#terminal = opts.terminal;
     this.#toast = opts.toast;
+    this.#onSessionChange = opts.onSessionChange;
 
     if (this.#pillHidden) {
       this.#pill.classList.add("hidden-pill");
@@ -62,6 +73,16 @@ export class ModalController {
         this.close();
       }
     });
+
+    this.#dialog.querySelector("#btn-close-modal")!.addEventListener("click", () => this.close());
+    this.#dialog.querySelector("#btn-apply-restart")!.addEventListener("click", () => {
+      void this.#restart();
+    });
+    for (const tab of MODAL_TABS) {
+      const button = this.#tabButton(tab);
+      button.addEventListener("click", () => this.#selectTab(tab));
+      button.addEventListener("keydown", (e) => this.#onTabKey(e, tab));
+    }
 
     window.addEventListener(
       "keydown",
@@ -76,10 +97,13 @@ export class ModalController {
           this.toggle();
           return;
         }
-        if (e.key === "Escape" && this.#open) {
+        if (!this.#open) return;
+        if (e.key === "Escape") {
           e.preventDefault();
           e.stopPropagation();
           this.close();
+        } else if (e.key === "Tab") {
+          this.#keepFocusInDialog(e);
         }
       },
       true,
@@ -95,10 +119,11 @@ export class ModalController {
     else this.open();
   }
 
-  open(): void {
+  open(tab: ModalTab = this.#tab): void {
     this.#open = true;
     this.render();
     this.#backdrop.classList.remove("hidden");
+    this.#selectTab(tab);
   }
 
   close(): void {
@@ -106,54 +131,82 @@ export class ModalController {
     this.#open = false;
     this.#customMemoryOpen = false;
     this.#backdrop.classList.add("hidden");
+    this.#dialog.querySelector("#modal-feedback")!.textContent = "";
     this.#terminal.focus();
   }
 
   render(): void {
-    const diag = this.#vmManager.getStats();
-    const jit = diag.stats?.jit;
-    const diskMiB = ((diag.diskBlocks * 4096) / 1048576).toFixed(1);
+    this.#renderWorkspace();
+    this.#renderStorage();
+    this.#renderSystem();
+  }
+
+  #tabButton(tab: ModalTab): HTMLButtonElement {
+    return this.#dialog.querySelector<HTMLButtonElement>(`#modal-tab-${tab}`)!;
+  }
+
+  #panel(tab: ModalTab): HTMLElement {
+    return this.#dialog.querySelector<HTMLElement>(`#modal-panel-${tab}`)!;
+  }
+
+  #selectTab(tab: ModalTab): void {
+    this.#tab = tab;
+    for (const candidate of MODAL_TABS) {
+      const selected = candidate === tab;
+      const button = this.#tabButton(candidate);
+      button.setAttribute("aria-selected", String(selected));
+      button.tabIndex = selected ? 0 : -1;
+      this.#panel(candidate).hidden = !selected;
+    }
+    this.#tabButton(tab).focus();
+  }
+
+  #onTabKey(e: KeyboardEvent, tab: ModalTab): void {
+    const index = MODAL_TABS.indexOf(tab);
+    const last = MODAL_TABS.length - 1;
+    let next: number;
+    switch (e.key) {
+      case "ArrowLeft":
+        next = index === 0 ? last : index - 1;
+        break;
+      case "ArrowRight":
+        next = index === last ? 0 : index + 1;
+        break;
+      case "Home":
+        next = 0;
+        break;
+      case "End":
+        next = last;
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+    this.#selectTab(MODAL_TABS[next]);
+  }
+
+  #keepFocusInDialog(e: KeyboardEvent): void {
+    const focusable = [...this.#dialog.querySelectorAll<HTMLElement>(
+      "button:not(:disabled), input:not(:disabled), [tabindex='0']",
+    )].filter((el) => el.tabIndex >= 0 && !el.closest("[hidden]"));
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (!first || !last) return;
+    const active = document.activeElement;
+    if (!this.#dialog.contains(active) || active === (e.shiftKey ? first : last)) {
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+    }
+  }
+
+  #renderWorkspace(): void {
+    const panel = this.#panel("workspace");
     const pickerSupported = isDirectoryPickerSupported();
     const mounts = [...this.#vmManager.mountedFolders.values()];
-
-    const effectiveMem = this.#vmManager.getEffectiveMemoryConfig();
-    const autoMem = this.#vmManager.getAutoMemoryInfo();
-    const isAutoMem = effectiveMem === null;
-    const isCustomMem = effectiveMem !== null && !isPresetMemoryMiB(effectiveMem);
-    const showCustomMemRow = this.#customMemoryOpen || isCustomMem;
-    const pendingMemChange = this.#vmManager.hasPendingMemoryChange();
-    const targetMemLabel = formatMemoryLabel(effectiveMem, autoMem.mib);
-    const customMemInputVal =
-      effectiveMem !== null ? String(effectiveMem) : String(diag.memoryMiB || autoMem.mib);
-
-    let memoryHint: string;
-    if (pendingMemChange) {
-      memoryHint = `当前 ${diag.memoryMiB} MiB → 下次启动 ${targetMemLabel}`;
-    } else if (this.#vmManager.hasUrlMemoryOverride()) {
-      memoryHint = `URL 参数 ?mem 临时覆盖（当前 ${diag.memoryMiB} MiB）`;
-    } else if (diag.memoryFallback) {
-      memoryHint = `目标 ${diag.memoryRequestedMiB} MiB 分配失败，已自动回退至 ${diag.memoryMiB} MiB`;
-    } else if (isAutoMem) {
-      memoryHint = `自动策略（当前 ${diag.memoryMiB} MiB，修改需重启生效）`;
-    } else {
-      memoryHint = `已分配 ${diag.memoryMiB} MiB（上限 4 GiB，修改需重启生效）`;
-    }
-
-    const memStatText = diag.memoryFallback
-      ? `${diag.memoryMiB} MiB (回退) · ${jit ? `${jit.compiled} 块已编译` : "启用"}`
-      : `${diag.memoryMiB} MiB · ${jit ? `${jit.compiled} 块已编译` : "启用"}`;
-
-    this.#dialog.innerHTML = `
-      <div class="modal-header">
-        <div class="modal-title-group">
-          <h2 class="modal-title" id="modal-title">unkernel · Neovim 控制中心</h2>
-          <span class="modal-subtitle">Alpine 3.24 riscv64 · DefectingCat/nvim</span>
-        </div>
-        <button class="modal-close" id="btn-close-modal" type="button">ESC 关闭</button>
-      </div>
-
+    const { activePty, currentCwd, currentMode } = this.#vmManager;
+    panel.innerHTML = `
       <div class="modal-section">
-        <h3 class="modal-section-title">工作区与本地目录挂载 (9p over vsock)</h3>
+        <h3 class="modal-section-title">本地目录与常用路径</h3>
         <div class="modal-grid">
           <button class="modal-btn primary" id="btn-mount-dir" type="button" ${pickerSupported ? "" : "disabled"}>
             <span>挂载本地文件夹…</span>
@@ -175,10 +228,10 @@ export class ModalController {
                   .map(
                     (m) => `
                   <div class="mount-item">
-                    <span class="mount-item-path">${m.guestPath}</span>
+                    <span class="mount-item-path">${escapeHtml(m.guestPath)}</span>
                     <div class="mount-item-actions">
-                      <button class="mini-btn" data-open-mount="${m.guestPath}" type="button">在 Neovim 中打开</button>
-                      <button class="mini-btn" data-unmount="${m.guestPath}" type="button">卸载</button>
+                      <button class="mini-btn" data-open-mount="${escapeHtml(m.guestPath)}" type="button">在 Neovim 中打开</button>
+                      <button class="mini-btn" data-unmount="${escapeHtml(m.guestPath)}" type="button">卸载</button>
                     </div>
                   </div>`,
                   )
@@ -189,37 +242,44 @@ export class ModalController {
       </div>
 
       <div class="modal-section">
-        <h3 class="modal-section-title">会话与终端画布</h3>
+        <h3 class="modal-section-title">会话与终端</h3>
         <div class="modal-grid">
           <button class="modal-btn" id="btn-restart-nvim" type="button">
-            <span>重启 Neovim 会话</span>
-            <span class="modal-btn-desc">在 ${this.#vmManager.currentCwd} 启动 nvim</span>
+            <span>${activePty && currentMode === "nvim" ? "重启 Neovim" : "启动 Neovim"}</span>
+            <span class="modal-btn-desc">工作目录 <code>${escapeHtml(currentCwd)}</code></span>
           </button>
           <button class="modal-btn" id="btn-switch-shell" type="button">
-            <span>切换到 Alpine Shell</span>
+            <span>${activePty && currentMode === "shell" ? "重启 Alpine Shell" : "打开 Alpine Shell"}</span>
             <span class="modal-btn-desc">打开 /bin/sh 终端命令行</span>
           </button>
         </div>
         <div class="row-bar">
-          <span class="row-label">Canvas 终端字号 (Maple Mono / Nerd Font)</span>
+          <span class="row-label">终端字号</span>
           <div class="row-controls">
-            <button class="mini-btn" id="btn-font-dec" type="button">−</button>
+            <button class="mini-btn" id="btn-font-dec" type="button" aria-label="减小字号">−</button>
             <span id="label-font-size">${this.#terminal.getFontSize()} px</span>
-            <button class="mini-btn" id="btn-font-inc" type="button">+</button>
+            <button class="mini-btn" id="btn-font-inc" type="button" aria-label="增大字号">+</button>
           </div>
         </div>
         <div class="row-bar">
-          <span class="row-label">右上角悬浮快捷胶囊</span>
+          <span class="row-label" id="label-menu-pill">右上角快捷入口</span>
           <div class="row-controls">
-            <button class="mini-btn" id="btn-toggle-pill" type="button">
-              ${this.#pillHidden ? "当前隐藏 (点击显示)" : "当前显示 (点击隐藏)"}
+            <kbd>${this.#pill.querySelector("kbd")?.textContent ?? "Ctrl+⇧+P"}</kbd>
+            <button class="mini-btn" id="btn-toggle-pill" type="button" role="switch" aria-labelledby="label-menu-pill" aria-checked="${!this.#pillHidden}">
+              ${this.#pillHidden ? "隐藏" : "显示"}
             </button>
           </div>
         </div>
       </div>
+    `;
+    this.#bindWorkspaceEvents(panel);
+  }
 
+  #renderStorage(): void {
+    const panel = this.#panel("storage");
+    panel.innerHTML = `
       <div class="modal-section">
-        <h3 class="modal-section-title">持久化存储 (IndexedDB) 与备份</h3>
+        <h3 class="modal-section-title">持久化磁盘</h3>
         <div class="modal-grid">
           <button class="modal-btn" id="btn-sync-disk" type="button">
             <span>立即同步落盘 (Sync)</span>
@@ -233,20 +293,54 @@ export class ModalController {
             <span>导入磁盘备份…</span>
             <span class="modal-btn-desc">从 .kwsparse.gz 恢复并刷新</span>
           </button>
-          <button class="modal-btn danger" id="btn-reset-disk" type="button">
-            <span>恢复出厂预烘焙镜像</span>
-            <span class="modal-btn-desc">清空本地改动，还原初始状态</span>
-          </button>
         </div>
-        <input type="file" id="input-import-disk" accept=".gz,.kwsparse" style="display:none" />
+        <input type="file" id="input-import-disk" accept=".gz,.kwsparse" hidden />
       </div>
+      <div class="row-bar modal-danger">
+        <div class="row-label-group">
+          <span class="row-label">恢复出厂镜像</span>
+          <span class="row-hint">清空浏览器内的磁盘改动，还原初始系统。</span>
+        </div>
+        <button class="mini-btn" id="btn-reset-disk" type="button">恢复出厂镜像…</button>
+      </div>
+    `;
+    this.#bindStorageEvents(panel);
+    this.#updateStorageButtons();
+  }
 
+  #renderSystem(): void {
+    const panel = this.#panel("system");
+    const diag = this.#vmManager.getStats();
+    const jit = diag.stats?.jit;
+    const diskMiB = ((diag.diskBlocks * 4096) / 1048576).toFixed(1);
+    const effectiveMem = this.#vmManager.getEffectiveMemoryConfig();
+    const autoMem = this.#vmManager.getAutoMemoryInfo();
+    const isAutoMem = effectiveMem === null;
+    const isCustomMem = effectiveMem !== null && !isPresetMemoryMiB(effectiveMem);
+    const showCustomMemRow = this.#customMemoryOpen || isCustomMem;
+    const customMemInputVal = effectiveMem ?? (diag.memoryMiB || autoMem.mib);
+
+    let memoryHint: string;
+    if (this.#vmManager.hasPendingMemoryChange()) {
+      const target = formatMemoryLabel(effectiveMem, autoMem.mib);
+      memoryHint = `当前 ${diag.memoryMiB} MiB → 下次启动 ${target}`;
+    } else if (this.#vmManager.hasUrlMemoryOverride()) {
+      memoryHint = `URL 参数 ?mem 临时覆盖（当前 ${diag.memoryMiB} MiB）`;
+    } else if (diag.memoryFallback) {
+      memoryHint = `目标 ${diag.memoryRequestedMiB} MiB 分配失败，已回退至 ${diag.memoryMiB} MiB`;
+    } else if (isAutoMem) {
+      memoryHint = `自动策略（当前 ${diag.memoryMiB} MiB）`;
+    } else {
+      memoryHint = `已分配 ${diag.memoryMiB} MiB`;
+    }
+
+    panel.innerHTML = `
       <div class="modal-section">
         <h3 class="modal-section-title">运行时性能与诊断</h3>
         <div class="stats-grid">
           <div class="stat-box">
             <div class="stat-key">Worker 传输通道</div>
-            <div class="stat-val">${diag.transport === "shared" ? "SharedArrayBuffer (0延迟)" : diag.transport}</div>
+            <div class="stat-val">${diag.transport === "shared" ? "SharedArrayBuffer" : escapeHtml(diag.transport)}</div>
           </div>
           <div class="stat-box">
             <div class="stat-key">Canvas 渲染器</div>
@@ -254,33 +348,38 @@ export class ModalController {
           </div>
           <div class="stat-box">
             <div class="stat-key">虚拟机内存 / JIT</div>
-            <div class="stat-val">${memStatText}</div>
+            <div class="stat-val">${diag.memoryMiB} MiB${diag.memoryFallback ? " · 回退" : ""}</div>
+            <div class="stat-detail">${jit ? `${jit.compiled} 块已编译` : "JIT 已启用"}</div>
           </div>
           <div class="stat-box">
             <div class="stat-key">持久化存储占用</div>
-            <div class="stat-val">${diskMiB} MiB (${diag.diskBlocks} 块)</div>
+            <div class="stat-val" id="stat-disk-size">${diskMiB} MiB</div>
+            <div class="stat-detail" id="stat-disk-blocks">${diag.diskBlocks} 块</div>
           </div>
         </div>
+      </div>
+      <div class="modal-section">
+        <h3 class="modal-section-title">内存与网络</h3>
         <div class="row-bar">
           <div class="row-label-group">
             <span class="row-label">虚拟机内存配额</span>
             <span class="row-hint">${memoryHint}</span>
           </div>
-          <div class="row-controls">
-            <button class="mini-btn ${isAutoMem && !this.#customMemoryOpen ? "active" : ""}" data-mem-preset="auto" type="button">自动</button>
+          <div class="row-controls" role="group" aria-label="内存配额">
+            <button class="mini-btn" aria-pressed="${isAutoMem && !this.#customMemoryOpen}" data-mem-preset="auto" type="button">自动</button>
             ${MEMORY_PRESETS_MIB.map((mib) => {
               const label = mib >= 1024 ? `${mib / 1024}G` : `${mib}M`;
               const active = effectiveMem === mib && !this.#customMemoryOpen;
-              return `<button class="mini-btn ${active ? "active" : ""}" data-mem-preset="${mib}" type="button">${label}</button>`;
+              return `<button class="mini-btn" aria-pressed="${active}" data-mem-preset="${mib}" type="button">${label}</button>`;
             }).join("")}
-            <button class="mini-btn ${showCustomMemRow ? "active" : ""}" id="btn-mem-custom" type="button">自定义</button>
+            <button class="mini-btn" aria-expanded="${showCustomMemRow}" id="btn-mem-custom" type="button">自定义</button>
           </div>
         </div>
         ${
           showCustomMemRow
             ? `<div class="row-bar">
-                <span class="row-label">自定义内存 (${MEMORY_MIN_MIB}–${MEMORY_MAX_MIB} MiB)</span>
-                <div class="row-controls" style="flex:1; max-width: 240px;">
+                <label class="row-label" for="input-memory-mib">自定义内存 (${MEMORY_MIN_MIB}–${MEMORY_MAX_MIB} MiB)</label>
+                <div class="row-controls row-input-controls">
                   <input
                     class="text-input"
                     id="input-memory-mib"
@@ -290,7 +389,7 @@ export class ModalController {
                     max="${MEMORY_MAX_MIB}"
                     step="64"
                     placeholder="例如 1536"
-                    value="${escapeAttr(customMemInputVal)}"
+                    value="${customMemInputVal}"
                   />
                   <span class="row-unit">MiB</span>
                   <button class="mini-btn" id="btn-save-memory" type="button">保存</button>
@@ -298,42 +397,30 @@ export class ModalController {
               </div>`
             : ""
         }
-        ${
-          pendingMemChange
-            ? `<div class="row-bar row-bar-accent">
-                <span class="row-label">内存已改为 ${targetMemLabel}，同步落盘并重启后生效</span>
-                <div class="row-controls">
-                  <button class="mini-btn active" id="btn-apply-memory-restart" type="button">同步并重启</button>
-                </div>
-              </div>`
-            : ""
-        }
         <div class="row-bar">
           <span class="row-label">虚拟机联网模式 (Wisp)</span>
-          <div class="row-controls">
-            <button class="mini-btn ${this.#vmManager.netMode === "builtin" ? "active" : ""}" data-net-mode="builtin" type="button">内置代理 (/wisp)</button>
-            <button class="mini-btn ${this.#vmManager.netMode === "custom" ? "active" : ""}" data-net-mode="custom" type="button">自定义</button>
-            <button class="mini-btn ${this.#vmManager.netMode === "off" ? "active" : ""}" data-net-mode="off" type="button">离线</button>
+          <div class="row-controls" role="group" aria-label="联网模式">
+            <button class="mini-btn" aria-pressed="${this.#vmManager.netMode === "builtin"}" data-net-mode="builtin" type="button">内置代理 (/wisp)</button>
+            <button class="mini-btn" aria-pressed="${this.#vmManager.netMode === "custom"}" data-net-mode="custom" type="button">自定义</button>
+            <button class="mini-btn" aria-pressed="${this.#vmManager.netMode === "off"}" data-net-mode="off" type="button">离线</button>
           </div>
         </div>
         ${
           this.#vmManager.netMode === "builtin"
             ? `<div class="row-bar">
-                <span class="row-label">当前代理通道 (免登录同源转发)</span>
-                <div class="row-controls">
-                  <span class="stat-val">${escapeAttr(getSameOriginWispUrl())}</span>
-                </div>
+                <span class="row-label">同源代理地址</span>
+                <span class="stat-val">${escapeHtml(getSameOriginWispUrl())}</span>
               </div>`
             : this.#vmManager.netMode === "custom"
               ? `<div class="row-bar">
-                  <span class="row-label">自定义 Wisp 地址</span>
-                  <div class="row-controls" style="flex:1; max-width: 340px;">
+                  <label class="row-label" for="input-wisp-url">自定义 Wisp 地址</label>
+                  <div class="row-controls row-input-controls">
                     <input
                       class="text-input"
                       id="input-wisp-url"
                       type="text"
                       placeholder="wss://your-wisp-proxy/"
-                      value="${escapeAttr(this.#vmManager.wispUrl)}"
+                      value="${escapeHtml(this.#vmManager.wispUrl)}"
                     />
                     <button class="mini-btn" id="btn-save-wisp" type="button">保存</button>
                   </div>
@@ -343,49 +430,46 @@ export class ModalController {
       </div>
     `;
 
-    this.#bindEvents();
+    this.#bindSystemEvents(panel);
+    this.#renderRestart();
   }
 
-  #bindEvents(): void {
-    const q = <T extends HTMLElement>(sel: string) => this.#dialog.querySelector<T>(sel);
+  #bindWorkspaceEvents(panel: HTMLElement): void {
+    const q = (sel: string) => panel.querySelector<HTMLButtonElement>(sel)!;
 
-    q("#btn-close-modal")?.addEventListener("click", () => this.close());
-
-    q("#btn-mount-dir")?.addEventListener("click", async () => {
+    q("#btn-mount-dir").addEventListener("click", async () => {
+      const button = q("#btn-mount-dir");
+      button.disabled = true;
       try {
         const dirFs = await pickHostDirectory();
         this.#toast(`正在挂载本地目录 ${dirFs.name}…`);
         const mounted = await this.#vmManager.mountHostDirectory(dirFs);
-        const pty = await this.#vmManager.startSession(
-          "nvim",
-          this.#terminal.getSize(),
-          mounted.guestPath,
-        );
-        this.#terminal.attachPty(pty);
-        this.#toast(`已挂载并打开 ${mounted.guestPath}`);
-        this.close();
+        this.#renderWorkspace();
+        this.#toast(`已挂载 ${mounted.guestPath}`);
+        await this.#switchSession("nvim", mounted.guestPath);
       } catch (err) {
         if ((err as { name?: string })?.name === "AbortError") return;
         this.#toast(`挂载失败: ${(err as Error)?.message ?? String(err)}`);
+      } finally {
+        button.disabled = false;
       }
     });
 
-    q("#btn-open-workspace")?.addEventListener("click", async () => {
-      await this.#switchDir("/workspace");
+    q("#btn-open-workspace").addEventListener("click", () => {
+      void this.#switchSession("nvim", "/workspace");
     });
 
-    q("#btn-open-nvim-config")?.addEventListener("click", async () => {
-      await this.#switchDir("/root/.config/nvim");
+    q("#btn-open-nvim-config").addEventListener("click", () => {
+      void this.#switchSession("nvim", "/root/.config/nvim");
     });
 
-    for (const btn of this.#dialog.querySelectorAll<HTMLButtonElement>("[data-open-mount]")) {
-      btn.addEventListener("click", async () => {
-        const path = btn.dataset.openMount!;
-        await this.#switchDir(path);
+    for (const btn of panel.querySelectorAll<HTMLButtonElement>("[data-open-mount]")) {
+      btn.addEventListener("click", () => {
+        void this.#switchSession("nvim", btn.dataset.openMount!);
       });
     }
 
-    for (const btn of this.#dialog.querySelectorAll<HTMLButtonElement>("[data-unmount]")) {
+    for (const btn of panel.querySelectorAll<HTMLButtonElement>("[data-unmount]")) {
       btn.addEventListener("click", async () => {
         const path = btn.dataset.unmount!;
         const entry = this.#vmManager.mountedFolders.get(path);
@@ -393,49 +477,52 @@ export class ModalController {
         await entry.mount.unmount().catch(() => {});
         this.#vmManager.mountedFolders.delete(path);
         this.#toast(`已卸载 ${path}`);
-        this.render();
+        const hadFocus = panel.contains(document.activeElement);
+        this.#renderWorkspace();
+        if (hadFocus) q("#btn-open-workspace").focus();
       });
     }
 
-    q("#btn-restart-nvim")?.addEventListener("click", async () => {
-      const pty = await this.#vmManager.startSession("nvim", this.#terminal.getSize());
-      this.#terminal.attachPty(pty);
-      this.close();
+    q("#btn-restart-nvim").addEventListener("click", () => {
+      void this.#switchSession("nvim");
     });
 
-    q("#btn-switch-shell")?.addEventListener("click", async () => {
-      const pty = await this.#vmManager.startSession("shell", this.#terminal.getSize());
-      this.#terminal.attachPty(pty);
-      this.close();
+    q("#btn-switch-shell").addEventListener("click", () => {
+      void this.#switchSession("shell");
     });
 
-    q("#btn-font-dec")?.addEventListener("click", () => {
-      this.#terminal.setFontSize(this.#terminal.getFontSize() - 1);
-      const lbl = q("#label-font-size");
-      if (lbl) lbl.textContent = `${this.#terminal.getFontSize()} px`;
-    });
+    const fontLabel = panel.querySelector("#label-font-size")!;
+    const resizeFont = (delta: number) => {
+      this.#terminal.setFontSize(this.#terminal.getFontSize() + delta);
+      fontLabel.textContent = `${this.#terminal.getFontSize()} px`;
+    };
+    q("#btn-font-dec").addEventListener("click", () => resizeFont(-1));
+    q("#btn-font-inc").addEventListener("click", () => resizeFont(1));
 
-    q("#btn-font-inc")?.addEventListener("click", () => {
-      this.#terminal.setFontSize(this.#terminal.getFontSize() + 1);
-      const lbl = q("#label-font-size");
-      if (lbl) lbl.textContent = `${this.#terminal.getFontSize()} px`;
-    });
-
-    q("#btn-toggle-pill")?.addEventListener("click", () => {
+    const pillToggle = q("#btn-toggle-pill");
+    pillToggle.addEventListener("click", () => {
       this.#pillHidden = !this.#pillHidden;
       localStorage.setItem("unkernel-nvim.hidePill", this.#pillHidden ? "1" : "0");
       this.#pill.classList.toggle("hidden-pill", this.#pillHidden);
-      this.render();
+      pillToggle.setAttribute("aria-checked", String(!this.#pillHidden));
+      pillToggle.textContent = this.#pillHidden ? "隐藏" : "显示";
     });
+  }
 
-    q("#btn-sync-disk")?.addEventListener("click", async () => {
+  #bindStorageEvents(panel: HTMLElement): void {
+    const q = <T extends HTMLElement>(sel: string) => panel.querySelector<T>(sel)!;
+    const run = (action: () => Promise<void>) => () => void this.#runDiskAction("storage", action);
+
+    q("#btn-sync-disk").addEventListener("click", run(async () => {
       this.#toast("正在同步文件系统到 IndexedDB…");
       const ok = await this.#vmManager.syncDisk();
-      this.#toast(ok ? "已落盘保存至 IndexedDB" : "同步完成");
-      this.render();
-    });
+      this.#toast(ok ? "已落盘保存至 IndexedDB" : "磁盘同步失败，请重试");
+      const { diskBlocks } = this.#vmManager.getStats();
+      this.#panel("system").querySelector("#stat-disk-size")!.textContent = `${((diskBlocks * 4096) / 1048576).toFixed(1)} MiB`;
+      this.#panel("system").querySelector("#stat-disk-blocks")!.textContent = `${diskBlocks} 块`;
+    }));
 
-    q("#btn-export-disk")?.addEventListener("click", async () => {
+    q("#btn-export-disk").addEventListener("click", run(async () => {
       try {
         this.#toast("正在导出压缩磁盘镜像…");
         const res = await this.#vmManager.exportDiskImage();
@@ -444,44 +531,48 @@ export class ModalController {
       } catch (err) {
         this.#toast(`导出失败: ${(err as Error)?.message ?? String(err)}`);
       }
-    });
+    }));
 
     const fileInput = q<HTMLInputElement>("#input-import-disk");
-    q("#btn-import-disk")?.addEventListener("click", () => {
-      fileInput?.click();
+    q("#btn-import-disk").addEventListener("click", () => {
+      fileInput.click();
     });
-    fileInput?.addEventListener("change", async () => {
+    fileInput.addEventListener("change", async () => {
       const file = fileInput.files?.[0];
       if (!file) return;
-      try {
-        this.#toast(`正在导入镜像 ${file.name}…`);
-        await this.#vmManager.importDiskImage(file);
-      } catch (err) {
-        this.#toast(`导入失败: ${(err as Error)?.message ?? String(err)}`);
-      }
+      fileInput.value = "";
+      await this.#runDiskAction("storage", async () => {
+        try {
+          this.#toast(`正在导入镜像 ${file.name}…`);
+          await this.#vmManager.importDiskImage(file);
+        } catch (err) {
+          this.#toast(`导入失败: ${(err as Error)?.message ?? String(err)}`);
+        }
+      });
     });
 
-    q("#btn-reset-disk")?.addEventListener("click", async () => {
+    q("#btn-reset-disk").addEventListener("click", run(async () => {
       if (!confirm("确定要清空本地 IndexedDB 修改并恢复至初始预烘焙镜像吗？")) return;
-      this.#toast("正在重置持久化磁盘…");
-      await this.#vmManager.resetToFactoryDisk();
-    });
+      try {
+        this.#toast("正在重置持久化磁盘…");
+        await this.#vmManager.resetToFactoryDisk();
+      } catch (err) {
+        this.#toast(`恢复出厂镜像失败: ${(err as Error)?.message ?? String(err)}`);
+      }
+    }));
+  }
 
-    for (const btn of this.#dialog.querySelectorAll<HTMLButtonElement>("[data-mem-preset]")) {
+  #bindSystemEvents(panel: HTMLElement): void {
+    const q = <T extends HTMLElement>(sel: string) => panel.querySelector<T>(sel);
+
+    for (const btn of panel.querySelectorAll<HTMLButtonElement>("[data-mem-preset]")) {
       btn.addEventListener("click", () => {
         const raw = btn.dataset.memPreset;
         if (!raw) return;
         const next: MemoryConfigMiB = raw === "auto" ? null : Number(raw);
         if (next !== null && !Number.isFinite(next)) return;
-        this.#customMemoryOpen = false;
-        this.#vmManager.setMemoryConfig(next);
-        this.render();
-        const label = formatMemoryLabel(next, this.#vmManager.getAutoMemoryInfo().mib);
-        if (this.#vmManager.hasPendingMemoryChange()) {
-          this.#toast(`已设为 ${label}，点击「同步并重启」或刷新页面后生效`);
-        } else {
-          this.#toast(`已设为 ${label}（与当前运行内存一致）`);
-        }
+        this.#setMemoryConfig(next);
+        q(`[data-mem-preset="${raw}"]`)?.focus();
       });
     }
 
@@ -495,11 +586,13 @@ export class ModalController {
         return;
       }
       this.#customMemoryOpen = !this.#customMemoryOpen;
-      this.render();
+      this.#renderSystem();
       if (this.#customMemoryOpen) {
         const input = q<HTMLInputElement>("#input-memory-mib");
         input?.focus();
         input?.select();
+      } else {
+        q("#btn-mem-custom")?.focus();
       }
     });
 
@@ -511,15 +604,8 @@ export class ModalController {
         input?.focus();
         return;
       }
-      this.#customMemoryOpen = !isPresetMemoryMiB(res.mib);
-      this.#vmManager.setMemoryConfig(res.mib);
-      this.render();
-      const label = formatMemoryLabel(res.mib);
-      if (this.#vmManager.hasPendingMemoryChange()) {
-        this.#toast(`已设为 ${label}，点击「同步并重启」或刷新页面后生效`);
-      } else {
-        this.#toast(`已设为 ${label}（与当前运行内存一致）`);
-      }
+      this.#setMemoryConfig(res.mib);
+      (q("#btn-save-memory") ?? q(`[data-mem-preset="${res.mib}"]`))?.focus();
     };
 
     q("#btn-save-memory")?.addEventListener("click", saveCustomMemory);
@@ -530,40 +616,101 @@ export class ModalController {
       }
     });
 
-    q<HTMLButtonElement>("#btn-apply-memory-restart")?.addEventListener("click", async (e) => {
-      const btn = e.currentTarget as HTMLButtonElement;
-      btn.disabled = true;
-      btn.textContent = "同步重启中…";
-      this.#toast("正在同步持久化磁盘并重启虚拟机…");
-      await this.#vmManager.syncAndReload();
-    });
-
-    for (const btn of this.#dialog.querySelectorAll<HTMLButtonElement>("[data-net-mode]")) {
+    for (const btn of panel.querySelectorAll<HTMLButtonElement>("[data-net-mode]")) {
       btn.addEventListener("click", () => {
         const mode = btn.dataset.netMode as NetMode;
         if (mode !== "builtin" && mode !== "custom" && mode !== "off") return;
         this.#vmManager.setNetworkConfig(mode);
-        this.render();
-        const label = mode === "builtin" ? "内置同源代理 (/wisp)" : mode === "custom" ? "自定义 Wisp 代理" : "离线模式";
-        this.#toast(`已切换至${label}，刷新页面后生效`);
+        this.#renderSystem();
+        (q("#input-wisp-url") ?? q(`[data-net-mode="${mode}"]`))?.focus();
       });
     }
 
-    q("#btn-save-wisp")?.addEventListener("click", () => {
-      const input = q<HTMLInputElement>("#input-wisp-url");
-      const val = input?.value.trim() ?? "";
-      this.#vmManager.setNetworkConfig("custom", val);
-      this.#toast("已保存自定义 Wisp 代理地址，刷新页面后生效");
+    const wispInput = q<HTMLInputElement>("#input-wisp-url");
+    if (wispInput) {
+      const saveWisp = () => {
+        wispInput.value = wispInput.value.trim();
+        this.#vmManager.setNetworkConfig("custom", wispInput.value);
+        this.#renderRestart();
+        this.#toast("已保存自定义 Wisp 地址");
+      };
+      q("#btn-save-wisp")?.addEventListener("click", saveWisp);
+      wispInput.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter") return;
+        e.preventDefault();
+        saveWisp();
+      });
+    }
+  }
+
+  #setMemoryConfig(next: MemoryConfigMiB): void {
+    this.#customMemoryOpen = next !== null && !isPresetMemoryMiB(next);
+    this.#vmManager.setMemoryConfig(next);
+    this.#renderSystem();
+    this.#toast(`已保存内存配额 ${formatMemoryLabel(next, this.#vmManager.getAutoMemoryInfo().mib)}`);
+  }
+
+  #renderRestart(): void {
+    const banner = this.#dialog.querySelector<HTMLElement>("#modal-restart")!;
+    const message = banner.querySelector("#modal-restart-message")!;
+    const button = banner.querySelector<HTMLButtonElement>("#btn-apply-restart")!;
+    const restarting = this.#diskAction === "restart";
+    banner.hidden = !restarting && !this.#vmManager.hasPendingRestartChanges();
+    if (banner.hidden) {
+      message.textContent = "";
+      return;
+    }
+    const settings = [
+      this.#vmManager.hasPendingMemoryChange() ? "内存配额" : null,
+      this.#vmManager.hasPendingNetworkChange() ? "Wisp 网络" : null,
+    ].filter(Boolean).join("、");
+    message.textContent = restarting ? "正在同步持久化磁盘…" : `${settings}将在重启后生效`;
+    button.disabled = this.#diskAction !== null;
+    button.textContent = restarting ? "正在重启…" : "同步并重启";
+  }
+
+  #updateStorageButtons(): void {
+    for (const button of this.#panel("storage").querySelectorAll("button")) {
+      button.disabled = this.#diskAction !== null;
+    }
+  }
+
+  async #runDiskAction(kind: DiskAction, action: () => Promise<void>): Promise<void> {
+    if (this.#diskAction) return;
+    this.#diskAction = kind;
+    this.#updateStorageButtons();
+    this.#renderRestart();
+    try {
+      await action();
+    } finally {
+      this.#diskAction = null;
+      this.#updateStorageButtons();
+      this.#renderRestart();
+    }
+  }
+
+  #restart(): Promise<void> {
+    return this.#runDiskAction("restart", async () => {
+      try {
+        await this.#vmManager.syncAndReload();
+      } catch (err) {
+        this.#toast(`重启失败: ${(err as Error)?.message ?? String(err)}`);
+      }
     });
   }
 
-  async #switchDir(dir: string): Promise<void> {
+  async #switchSession(mode: SessionMode, dir?: string): Promise<void> {
+    if (this.#startingSession) return;
+    this.#startingSession = true;
     try {
-      const pty = await this.#vmManager.startSession("nvim", this.#terminal.getSize(), dir);
+      const pty = await this.#vmManager.startSession(mode, this.#terminal.getSize(), dir);
       this.#terminal.attachPty(pty);
+      this.#onSessionChange?.(mode);
       this.close();
     } catch (err) {
-      this.#toast(`切换工作区失败: ${(err as Error)?.message ?? String(err)}`);
+      this.#toast(`启动${mode === "nvim" ? " Neovim" : " Shell"}失败: ${(err as Error)?.message ?? String(err)}`);
+    } finally {
+      this.#startingSession = false;
     }
   }
 }

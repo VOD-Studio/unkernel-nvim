@@ -166,6 +166,7 @@ export class VmManager {
   mountedFolders: Map<string, MountedFolder> = new Map();
   wispUrl: string = localStorage.getItem("unkernel-nvim.wisp") ?? "";
   netMode: NetMode = loadInitialNetMode(this.wispUrl);
+  #bootedNetwork: { mode: NetMode; servers: string[] } | null = null;
   memoryConfigMiB: MemoryConfigMiB = loadStoredMemoryConfig();
   urlMemoryOverride: MemoryConfigMiB | undefined = loadUrlMemoryOverride();
   memoryRequestedMiB: number | null = null;
@@ -225,6 +226,19 @@ export class VmManager {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
+  }
+
+  hasPendingNetworkChange(): boolean {
+    const network = this.#bootedNetwork;
+    if (!this.vm || !network) return false;
+    if (this.netMode !== network.mode) return true;
+    const nextServers = this.getEffectiveWispServers();
+    return nextServers.length !== network.servers.length ||
+      nextServers.some((server, i) => server !== network.servers[i]);
+  }
+
+  hasPendingRestartChanges(): boolean {
+    return this.hasPendingMemoryChange() || this.hasPendingNetworkChange();
   }
 
   setNetworkConfig(mode: NetMode, customUrl?: string): void {
@@ -297,6 +311,7 @@ export class VmManager {
     };
 
     const wispServers = this.getEffectiveWispServers();
+    const network = { mode: this.netMode, servers: [...wispServers] };
     const netSpec: NetSpec | undefined =
       wispServers.length > 0
         ? {
@@ -357,6 +372,7 @@ export class VmManager {
       onProgress,
       log: (m) => console.debug(m),
     });
+    this.#bootedNetwork = network;
 
     if (this.memoryAllocatedMiB === null) {
       this.memoryAllocatedMiB = this.vm.memoryMiB;
@@ -382,14 +398,13 @@ export class VmManager {
     targetPath?: string,
   ): Promise<Pty> {
     if (!this.vm) throw new Error("Kernel is not running");
-    if (this.activePty) {
-      await this.activePty.close().catch(() => {});
+    const previousPty = this.activePty;
+    if (previousPty) {
       this.activePty = null;
+      await previousPty.close().catch(() => {});
     }
 
-    this.currentMode = mode;
     const cwd = targetPath ?? this.currentCwd;
-    this.currentCwd = cwd;
 
     this.#onStatus({
       phase: "userspace",
@@ -417,6 +432,8 @@ export class VmManager {
       },
     });
 
+    this.currentMode = mode;
+    this.currentCwd = cwd;
     this.activePty = pty;
     void pty.ended.then(
       (end) => {
@@ -483,7 +500,7 @@ export class VmManager {
   }
 
   async syncAndReload(): Promise<void> {
-    await this.syncDisk();
+    if (!(await this.syncDisk())) throw new Error("磁盘同步未完成，请重试");
     if (this.vm instanceof WorkerKernel) {
       await this.vm.detachDisk(0).catch(() => {});
       await this.vm.stop().catch(() => {});

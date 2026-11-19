@@ -3,7 +3,6 @@
 // WorkerKernel VM manager, boot progress overlay, and modal control center.
 
 import { ModalController } from "./modal.ts";
-import "./style.css";
 import { CanvasTerminal } from "./terminal.ts";
 import { VmManager, type BootStatusUpdate } from "./vm-manager.ts";
 
@@ -18,12 +17,24 @@ const pillLabelEl = document.getElementById("pill-label")!;
 const pillKbdEl = document.getElementById("pill-kbd")!;
 const modalBackdropEl = document.getElementById("modal-backdrop")!;
 const modalDialogEl = document.getElementById("modal-dialog")!;
+const modalFeedbackEl = document.getElementById("modal-feedback")!;
 const toastContainerEl = document.getElementById("toast-container")!;
 
 const isMac = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent);
 pillKbdEl.textContent = isMac ? "⌘⇧P" : "Ctrl+⇧+P";
 
+let modalFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
+
 function showToast(message: string, durationMs = 3200): void {
+  if (modal?.isOpen) {
+    clearTimeout(modalFeedbackTimer);
+    modalFeedbackEl.textContent = message;
+    modalFeedbackTimer = setTimeout(() => {
+      modalFeedbackEl.textContent = "";
+    }, durationMs);
+    return;
+  }
+
   const el = document.createElement("div");
   el.className = "toast";
   el.textContent = message;
@@ -36,7 +47,7 @@ function showToast(message: string, durationMs = 3200): void {
 function hideBootOverlay(): void {
   if (bootOverlayEl.classList.contains("fade-out")) return;
   bootOverlayEl.classList.add("fade-out");
-  terminal.focus();
+  if (!modal?.isOpen) terminal.focus();
 }
 
 function updateBootOverlay(s: BootStatusUpdate): void {
@@ -70,12 +81,12 @@ const vmManager = new VmManager({
   onStatus: updateBootOverlay,
   onSessionExit: (mode) => {
     pillLabelEl.textContent = `${mode} (exited)`;
+    modal?.open("workspace");
     showToast(
       mode === "nvim"
-        ? "Neovim 已退出，正在为您重新打开控制中心…"
-        : "Shell 会话已结束，正在打开控制中心…",
+        ? "Neovim 已退出"
+        : "Shell 会话已结束",
     );
-    modal?.open();
   },
 });
 
@@ -86,6 +97,9 @@ modal = new ModalController({
   vmManager,
   terminal,
   toast: showToast,
+  onSessionChange: (mode) => {
+    pillLabelEl.textContent = mode === "nvim" ? "nvim" : "sh";
+  },
 });
 
 async function bootApp(): Promise<void> {
