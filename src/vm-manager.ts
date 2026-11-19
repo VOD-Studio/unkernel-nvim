@@ -12,6 +12,7 @@ import {
   importDataDisk,
   kwsparseHeader,
   resetDataDisk,
+  webCpuBlocker,
   WorkerKernel,
   type BootProgress,
   type DiskSpec,
@@ -21,7 +22,7 @@ import {
   type NetSpec,
   type Pty,
   type PtyEnd,
-} from "unkernel";
+} from "@vod-studio/unkernel";
 import { BrowserDirectoryFs } from "./fs-bridge.ts";
 import {
   MEMORY_FALLBACK_MIB,
@@ -34,6 +35,8 @@ export const DISK_NAME = "unkernel-nvim";
 export const DISK_VERSION = "v1";
 export const DISK_SIZE_BYTES = 4 * 1024 * 1024 * 1024; // 4 GiB kwdata template size
 export const PREBAKED_DISK_URL = "/nvim-data.kwsparse.gz";
+const CPU_STORAGE_KEY = "unkernel-nvim.cpus";
+const MAX_CPUS = 8; // CONFIG_NR_CPUS in the bundled SMP kernel
 const SNAPSHOT_DB_NAME = "unkernel-nvim-snapshots";
 const SNAPSHOT_STORE = "snapshots";
 const SNAPSHOT_KEY = "latest";
@@ -167,12 +170,36 @@ export class VmManager {
   wispUrl: string = localStorage.getItem("unkernel-nvim.wisp") ?? "";
   netMode: NetMode = loadInitialNetMode(this.wispUrl);
   #bootedNetwork: { mode: NetMode; servers: string[] } | null = null;
+  readonly cpuBlocker = webCpuBlocker({ worker: true });
+  readonly cpuLimit = this.cpuBlocker ? 1 : Math.min(navigator.hardwareConcurrency || 1, MAX_CPUS);
+  #cpuCount = this.#loadCpuCount();
+  #bootCpuCount: number | null = null;
+  #onlineCpuCount: number | null = null;
   memoryConfigMiB: MemoryConfigMiB = loadStoredMemoryConfig();
   urlMemoryOverride: MemoryConfigMiB | undefined = loadUrlMemoryOverride();
   memoryRequestedMiB: number | null = null;
   memoryAllocatedMiB: number | null = null;
   memoryFallbackReasons: string[] = [];
   seededFromCache = false;
+
+  #loadCpuCount(): number {
+    const stored = Number(localStorage.getItem(CPU_STORAGE_KEY));
+    return Number.isInteger(stored) && stored >= 1 ? Math.min(stored, this.cpuLimit) : 1;
+  }
+
+  get cpuCount(): number {
+    return this.#cpuCount;
+  }
+
+  setCpuCount(cpus: number): void {
+    if (!Number.isInteger(cpus) || cpus < 1 || cpus > this.cpuLimit) return;
+    localStorage.setItem(CPU_STORAGE_KEY, String(cpus));
+    this.#cpuCount = cpus;
+  }
+
+  hasPendingCpuChange(): boolean {
+    return this.#bootCpuCount !== null && this.#cpuCount !== this.#bootCpuCount;
+  }
 
   getAutoMemoryInfo(): { mib: number; why: string } {
     return autoMemoryMiB();
@@ -238,7 +265,7 @@ export class VmManager {
   }
 
   hasPendingRestartChanges(): boolean {
-    return this.hasPendingMemoryChange() || this.hasPendingNetworkChange();
+    return this.hasPendingCpuChange() || this.hasPendingMemoryChange() || this.hasPendingNetworkChange();
   }
 
   setNetworkConfig(mode: NetMode, customUrl?: string): void {
@@ -264,6 +291,9 @@ export class VmManager {
   }
 
   async boot(cols: number, rows: number): Promise<void> {
+    const cpus = this.#cpuCount;
+    this.#bootCpuCount = cpus;
+    this.#onlineCpuCount = null;
     this.#onStatus({ phase: "check", title: "检查浏览器 WebAssembly / JSPI 环境…" });
     const support = await checkSupport();
     if (!support.ok) {
@@ -362,6 +392,7 @@ export class VmManager {
 
     this.vm = await createKernel({
       worker: true,
+      cpus,
       jit: true,
       vsock: true,
       ...(effectiveMemory !== null ? { memoryMiB: effectiveMemory } : {}),
@@ -373,6 +404,14 @@ export class VmManager {
       log: (m) => console.debug(m),
     });
     this.#bootedNetwork = network;
+
+    if (cpus > 1) {
+      const result = await this.vm.exec("/usr/bin/nproc", [], { signal: AbortSignal.timeout(2000) }).catch(() => null);
+      const online = Number(result?.stdout.trim());
+      if (result?.exitCode === 0 && Number.isInteger(online) && online >= 1 && online <= cpus) {
+        this.#onlineCpuCount = online;
+      }
+    }
 
     if (this.memoryAllocatedMiB === null) {
       this.memoryAllocatedMiB = this.vm.memoryMiB;
@@ -500,10 +539,22 @@ export class VmManager {
   }
 
   async syncAndReload(): Promise<void> {
-    if (!(await this.syncDisk())) throw new Error("磁盘同步未完成，请重试");
-    if (this.vm instanceof WorkerKernel) {
-      await this.vm.detachDisk(0).catch(() => {});
-      await this.vm.stop().catch(() => {});
+    const vm = this.vm;
+    if (vm) {
+      if (!(await this.syncDisk())) throw new Error("磁盘同步未完成，请重试");
+      // Alpine clears the overlay boot counter during an orderly shutdown.
+      vm.write("poweroff\n");
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          vm.exited,
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(() => reject(new Error("虚拟机关闭超时，请重试")), 10_000);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timeout);
+      }
     }
     location.reload();
   }
@@ -520,6 +571,9 @@ export class VmManager {
 
   async saveMemorySnapshot(): Promise<{ bytes: number }> {
     if (!this.vm) throw new Error("Kernel is not running");
+    if ((this.#bootCpuCount ?? 1) > 1) {
+      throw new Error("多核模式暂不支持内存快照，可使用磁盘同步保存文件。");
+    }
     if (this.mountedFolders.size > 0) {
       throw new Error("挂载了本地宿主机目录时不支持保存内存快照，请先卸载本地目录或直接使用磁盘持久化 (Sync)。");
     }
@@ -535,6 +589,7 @@ export class VmManager {
 
   getStats(): {
     transport: string;
+    cpus: number | null;
     memoryMiB: number;
     memoryRequestedMiB: number;
     memoryFallback: boolean;
@@ -551,6 +606,7 @@ export class VmManager {
     const memoryMiB = this.vm?.memoryMiB ?? 0;
     return {
       transport: this.vm?.transport ?? "unknown",
+      cpus: this.#onlineCpuCount ?? stats?.cpus ?? null,
       memoryMiB,
       memoryRequestedMiB: this.memoryRequestedMiB ?? memoryMiB,
       memoryFallback: this.didMemoryFallback(),

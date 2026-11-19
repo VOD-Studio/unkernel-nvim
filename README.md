@@ -1,6 +1,6 @@
 # unkernel-nvim
 
-基于 [unkernel](https://github.com/pithings/unkernel)（WebAssembly Linux 7.x 内核 + Alpine `riscv64` JIT）、[DefectingCat/nvim](https://github.com/DefectingCat/nvim) 与 **Bun 1.4** 原生后端构建的全屏浏览器端 Neovim 工作区。在浏览器本地运行完整的 Linux 用户态、原生 Neovim 0.12、LSP 与 Tree-sitter 工具链，并内置零外部依赖的自建 Wisp 联网后端与公网免登录安全防护。
+基于 [@vod-studio/unkernel](https://github.com/VOD-Studio/unkernel)（WebAssembly Linux 7.x 内核 + Alpine `riscv64` JIT）、[DefectingCat/nvim](https://github.com/DefectingCat/nvim) 与 **Bun 1.4** 原生后端构建的全屏浏览器端 Neovim 工作区。在浏览器本地运行完整的 Linux 用户态、原生 Neovim 0.12、LSP 与 Tree-sitter 工具链，并内置零外部依赖的自建 Wisp 联网后端与公网免登录安全防护。
 
 ---
 
@@ -28,6 +28,12 @@ bun run dev
 ```
 
 浏览器访问 `http://localhost:5173` 即可进入全屏 Neovim 环境，默认自动通过同源 `/wisp` 联网。
+
+### 虚拟机多核
+
+打开控制中心的 **虚拟机与诊断**，选择 **虚拟 CPU 核数**，再点击 **同步并重启**。设置保存在当前浏览器，诊断面板会显示实际在线的核数。默认使用 1 核，可选上限为浏览器报告的逻辑处理器数量，最多 8 核。
+
+多核（SMP）为实验功能，需要跨源隔离和 `Atomics.waitAsync`。项目已设置 COOP / COEP 响应头，请通过 HTTPS 或 `localhost` 访问。多核模式暂不支持内存快照，文件可通过存储面板同步至 IndexedDB 或导出磁盘备份。
 
 ### 常用命令
 

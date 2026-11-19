@@ -9,7 +9,7 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import type { Pty } from "unkernel";
+import type { Pty } from "@vod-studio/unkernel";
 
 /** Exact dark palette from https://github.com/DefectingCat/clay.nvim */
 export const CLAY_DARK_PALETTE = {

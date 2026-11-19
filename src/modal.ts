@@ -188,7 +188,7 @@ export class ModalController {
 
   #keepFocusInDialog(e: KeyboardEvent): void {
     const focusable = [...this.#dialog.querySelectorAll<HTMLElement>(
-      "button:not(:disabled), input:not(:disabled), [tabindex='0']",
+      "button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex='0']",
     )].filter((el) => el.tabIndex >= 0 && !el.closest("[hidden]"));
     const first = focusable[0];
     const last = focusable.at(-1);
@@ -314,6 +314,18 @@ export class ModalController {
     const diag = this.#vmManager.getStats();
     const jit = diag.stats?.jit;
     const diskMiB = ((diag.diskBlocks * 4096) / 1048576).toFixed(1);
+    const { cpuCount, cpuLimit, cpuBlocker } = this.#vmManager;
+    const cpuLabel = diag.cpus === null ? "—" : `${diag.cpus} 核`;
+    let cpuHint = "多核为实验功能，暂不支持内存快照";
+    if (cpuBlocker) {
+      cpuHint = diag.crossOriginIsolated ? "当前浏览器环境仅支持单核" : "多核需要跨源隔离";
+    } else if (cpuLimit === 1) {
+      cpuHint = "浏览器仅提供 1 个逻辑处理器";
+    } else if (this.#vmManager.hasPendingCpuChange()) {
+      cpuHint = `下次启动使用 ${cpuCount} 核`;
+    } else if (diag.cpus !== null && diag.cpus !== cpuCount) {
+      cpuHint = `配置 ${cpuCount} 核，实际在线 ${diag.cpus} 核`;
+    }
     const effectiveMem = this.#vmManager.getEffectiveMemoryConfig();
     const autoMem = this.#vmManager.getAutoMemoryInfo();
     const isAutoMem = effectiveMem === null;
@@ -348,8 +360,8 @@ export class ModalController {
             <div class="stat-val">${this.#terminal.webglActive ? "WebGL2 GPU" : "Canvas Fallback"}</div>
           </div>
           <div class="stat-box">
-            <div class="stat-key">虚拟机内存 / JIT</div>
-            <div class="stat-val">${diag.memoryMiB} MiB${diag.memoryFallback ? " · 回退" : ""}</div>
+            <div class="stat-key">虚拟机 CPU / 内存</div>
+            <div class="stat-val"><span id="stat-cpus">${cpuLabel}</span> · ${diag.memoryMiB} MiB${diag.memoryFallback ? " · 回退" : ""}</div>
             <div class="stat-detail">${jit ? `${jit.compiled} 块已编译` : "JIT 已启用"}</div>
           </div>
           <div class="stat-box">
@@ -360,7 +372,21 @@ export class ModalController {
         </div>
       </div>
       <div class="modal-section">
-        <h3 class="modal-section-title">内存与网络</h3>
+        <h3 class="modal-section-title">虚拟机配置</h3>
+        <div class="row-bar">
+          <div class="row-label-group">
+            <label class="row-label" for="select-vcpus">虚拟 CPU 核数</label>
+            <span class="row-hint" id="cpu-hint">${cpuHint}</span>
+          </div>
+          <div class="row-controls">
+            <select class="text-input" id="select-vcpus" aria-describedby="cpu-hint" ${cpuLimit === 1 ? "disabled" : ""}>
+              ${Array.from({ length: cpuLimit }, (_, i) => {
+                const cpus = i + 1;
+                return `<option value="${cpus}" ${cpus === cpuCount ? "selected" : ""}>${cpus} 核</option>`;
+              }).join("")}
+            </select>
+          </div>
+        </div>
         <div class="row-bar">
           <div class="row-label-group">
             <span class="row-label">虚拟机内存配额</span>
@@ -566,6 +592,13 @@ export class ModalController {
   #bindSystemEvents(panel: HTMLElement): void {
     const q = <T extends HTMLElement>(sel: string) => panel.querySelector<T>(sel);
 
+    const cpuSelect = q<HTMLSelectElement>("#select-vcpus")!;
+    cpuSelect.addEventListener("change", () => {
+      this.#vmManager.setCpuCount(Number(cpuSelect.value));
+      this.#renderSystem();
+      q("#select-vcpus")?.focus();
+    });
+
     for (const btn of panel.querySelectorAll<HTMLButtonElement>("[data-mem-preset]")) {
       btn.addEventListener("click", () => {
         const raw = btn.dataset.memPreset;
@@ -662,6 +695,7 @@ export class ModalController {
       return;
     }
     const settings = [
+      this.#vmManager.hasPendingCpuChange() ? "CPU 核数" : null,
       this.#vmManager.hasPendingMemoryChange() ? "内存配额" : null,
       this.#vmManager.hasPendingNetworkChange() ? "Wisp 网络" : null,
     ].filter(Boolean).join("、");

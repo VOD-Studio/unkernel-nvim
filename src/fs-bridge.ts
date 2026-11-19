@@ -11,7 +11,7 @@ import {
   type FsFile,
   type FsOpenFlags,
   type FsSetAttr,
-} from "unkernel";
+} from "@vod-studio/unkernel";
 
 declare global {
   interface Window {

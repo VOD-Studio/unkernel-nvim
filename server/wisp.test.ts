@@ -4,7 +4,7 @@
 
 import { afterAll, describe, expect, test } from "bun:test";
 import { createServer, type Server as TcpServer } from "node:net";
-import { wispBackend } from "unkernel/node";
+import { wispBackend } from "@vod-studio/unkernel/node";
 import { startAppServer } from "./index.ts";
 import {
   buildSessionSetCookieHeader,

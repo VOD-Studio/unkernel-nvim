@@ -26,7 +26,7 @@ import {
   nodeFs,
   readKwsparse,
   SparseBase,
-} from "unkernel/node";
+} from "@vod-studio/unkernel/node";
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
