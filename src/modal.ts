@@ -4,6 +4,15 @@
 // font sizing, disk persistence/export/import/reset, and runtime diagnostics.
 
 import { isDirectoryPickerSupported, pickHostDirectory } from "./fs-bridge.ts";
+import {
+  formatMemoryLabel,
+  isPresetMemoryMiB,
+  MEMORY_MAX_MIB,
+  MEMORY_MIN_MIB,
+  MEMORY_PRESETS_MIB,
+  validateCustomMemoryInput,
+  type MemoryConfigMiB,
+} from "./memory-config.ts";
 import type { CanvasTerminal } from "./terminal.ts";
 import { getSameOriginWispUrl, type NetMode, type VmManager } from "./vm-manager.ts";
 
@@ -33,6 +42,7 @@ export class ModalController {
   #toast: (msg: string) => void;
   #open = false;
   #pillHidden = localStorage.getItem("unkernel-nvim.hidePill") === "1";
+  #customMemoryOpen = false;
 
   constructor(opts: ModalControllerOptions) {
     this.#backdrop = opts.backdrop;
@@ -94,6 +104,7 @@ export class ModalController {
   close(): void {
     if (!this.#open) return;
     this.#open = false;
+    this.#customMemoryOpen = false;
     this.#backdrop.classList.add("hidden");
     this.#terminal.focus();
   }
@@ -104,6 +115,33 @@ export class ModalController {
     const diskMiB = ((diag.diskBlocks * 4096) / 1048576).toFixed(1);
     const pickerSupported = isDirectoryPickerSupported();
     const mounts = [...this.#vmManager.mountedFolders.values()];
+
+    const effectiveMem = this.#vmManager.getEffectiveMemoryConfig();
+    const autoMem = this.#vmManager.getAutoMemoryInfo();
+    const isAutoMem = effectiveMem === null;
+    const isCustomMem = effectiveMem !== null && !isPresetMemoryMiB(effectiveMem);
+    const showCustomMemRow = this.#customMemoryOpen || isCustomMem;
+    const pendingMemChange = this.#vmManager.hasPendingMemoryChange();
+    const targetMemLabel = formatMemoryLabel(effectiveMem, autoMem.mib);
+    const customMemInputVal =
+      effectiveMem !== null ? String(effectiveMem) : String(diag.memoryMiB || autoMem.mib);
+
+    let memoryHint: string;
+    if (pendingMemChange) {
+      memoryHint = `当前 ${diag.memoryMiB} MiB → 下次启动 ${targetMemLabel}`;
+    } else if (this.#vmManager.hasUrlMemoryOverride()) {
+      memoryHint = `URL 参数 ?mem 临时覆盖（当前 ${diag.memoryMiB} MiB）`;
+    } else if (diag.memoryFallback) {
+      memoryHint = `目标 ${diag.memoryRequestedMiB} MiB 分配失败，已自动回退至 ${diag.memoryMiB} MiB`;
+    } else if (isAutoMem) {
+      memoryHint = `自动策略（当前 ${diag.memoryMiB} MiB，修改需重启生效）`;
+    } else {
+      memoryHint = `已分配 ${diag.memoryMiB} MiB（上限 4 GiB，修改需重启生效）`;
+    }
+
+    const memStatText = diag.memoryFallback
+      ? `${diag.memoryMiB} MiB (回退) · ${jit ? `${jit.compiled} 块已编译` : "启用"}`
+      : `${diag.memoryMiB} MiB · ${jit ? `${jit.compiled} 块已编译` : "启用"}`;
 
     this.#dialog.innerHTML = `
       <div class="modal-header">
@@ -216,13 +254,60 @@ export class ModalController {
           </div>
           <div class="stat-box">
             <div class="stat-key">虚拟机内存 / JIT</div>
-            <div class="stat-val">${diag.memoryMiB} MiB · ${jit ? `${jit.compiled} 块已编译` : "启用"}</div>
+            <div class="stat-val">${memStatText}</div>
           </div>
           <div class="stat-box">
             <div class="stat-key">持久化存储占用</div>
             <div class="stat-val">${diskMiB} MiB (${diag.diskBlocks} 块)</div>
           </div>
         </div>
+        <div class="row-bar">
+          <div class="row-label-group">
+            <span class="row-label">虚拟机内存配额</span>
+            <span class="row-hint">${memoryHint}</span>
+          </div>
+          <div class="row-controls">
+            <button class="mini-btn ${isAutoMem && !this.#customMemoryOpen ? "active" : ""}" data-mem-preset="auto" type="button">自动</button>
+            ${MEMORY_PRESETS_MIB.map((mib) => {
+              const label = mib >= 1024 ? `${mib / 1024}G` : `${mib}M`;
+              const active = effectiveMem === mib && !this.#customMemoryOpen;
+              return `<button class="mini-btn ${active ? "active" : ""}" data-mem-preset="${mib}" type="button">${label}</button>`;
+            }).join("")}
+            <button class="mini-btn ${showCustomMemRow ? "active" : ""}" id="btn-mem-custom" type="button">自定义</button>
+          </div>
+        </div>
+        ${
+          showCustomMemRow
+            ? `<div class="row-bar">
+                <span class="row-label">自定义内存 (${MEMORY_MIN_MIB}–${MEMORY_MAX_MIB} MiB)</span>
+                <div class="row-controls" style="flex:1; max-width: 240px;">
+                  <input
+                    class="text-input"
+                    id="input-memory-mib"
+                    type="number"
+                    inputmode="numeric"
+                    min="${MEMORY_MIN_MIB}"
+                    max="${MEMORY_MAX_MIB}"
+                    step="64"
+                    placeholder="例如 1536"
+                    value="${escapeAttr(customMemInputVal)}"
+                  />
+                  <span class="row-unit">MiB</span>
+                  <button class="mini-btn" id="btn-save-memory" type="button">保存</button>
+                </div>
+              </div>`
+            : ""
+        }
+        ${
+          pendingMemChange
+            ? `<div class="row-bar row-bar-accent">
+                <span class="row-label">内存已改为 ${targetMemLabel}，同步落盘并重启后生效</span>
+                <div class="row-controls">
+                  <button class="mini-btn active" id="btn-apply-memory-restart" type="button">同步并重启</button>
+                </div>
+              </div>`
+            : ""
+        }
         <div class="row-bar">
           <span class="row-label">虚拟机联网模式 (Wisp)</span>
           <div class="row-controls">
@@ -380,6 +465,77 @@ export class ModalController {
       if (!confirm("确定要清空本地 IndexedDB 修改并恢复至初始预烘焙镜像吗？")) return;
       this.#toast("正在重置持久化磁盘…");
       await this.#vmManager.resetToFactoryDisk();
+    });
+
+    for (const btn of this.#dialog.querySelectorAll<HTMLButtonElement>("[data-mem-preset]")) {
+      btn.addEventListener("click", () => {
+        const raw = btn.dataset.memPreset;
+        if (!raw) return;
+        const next: MemoryConfigMiB = raw === "auto" ? null : Number(raw);
+        if (next !== null && !Number.isFinite(next)) return;
+        this.#customMemoryOpen = false;
+        this.#vmManager.setMemoryConfig(next);
+        this.render();
+        const label = formatMemoryLabel(next, this.#vmManager.getAutoMemoryInfo().mib);
+        if (this.#vmManager.hasPendingMemoryChange()) {
+          this.#toast(`已设为 ${label}，点击「同步并重启」或刷新页面后生效`);
+        } else {
+          this.#toast(`已设为 ${label}（与当前运行内存一致）`);
+        }
+      });
+    }
+
+    q("#btn-mem-custom")?.addEventListener("click", () => {
+      const effectiveMem = this.#vmManager.getEffectiveMemoryConfig();
+      const isCustom = effectiveMem !== null && !isPresetMemoryMiB(effectiveMem);
+      if (isCustom) {
+        const input = q<HTMLInputElement>("#input-memory-mib");
+        input?.focus();
+        input?.select();
+        return;
+      }
+      this.#customMemoryOpen = !this.#customMemoryOpen;
+      this.render();
+      if (this.#customMemoryOpen) {
+        const input = q<HTMLInputElement>("#input-memory-mib");
+        input?.focus();
+        input?.select();
+      }
+    });
+
+    const saveCustomMemory = () => {
+      const input = q<HTMLInputElement>("#input-memory-mib");
+      const res = validateCustomMemoryInput(input?.value ?? "");
+      if (!res.ok) {
+        this.#toast(res.error);
+        input?.focus();
+        return;
+      }
+      this.#customMemoryOpen = !isPresetMemoryMiB(res.mib);
+      this.#vmManager.setMemoryConfig(res.mib);
+      this.render();
+      const label = formatMemoryLabel(res.mib);
+      if (this.#vmManager.hasPendingMemoryChange()) {
+        this.#toast(`已设为 ${label}，点击「同步并重启」或刷新页面后生效`);
+      } else {
+        this.#toast(`已设为 ${label}（与当前运行内存一致）`);
+      }
+    };
+
+    q("#btn-save-memory")?.addEventListener("click", saveCustomMemory);
+    q<HTMLInputElement>("#input-memory-mib")?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        saveCustomMemory();
+      }
+    });
+
+    q<HTMLButtonElement>("#btn-apply-memory-restart")?.addEventListener("click", async (e) => {
+      const btn = e.currentTarget as HTMLButtonElement;
+      btn.disabled = true;
+      btn.textContent = "同步重启中…";
+      this.#toast("正在同步持久化磁盘并重启虚拟机…");
+      await this.#vmManager.syncAndReload();
     });
 
     for (const btn of this.#dialog.querySelectorAll<HTMLButtonElement>("[data-net-mode]")) {

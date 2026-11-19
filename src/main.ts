@@ -100,6 +100,13 @@ async function bootApp(): Promise<void> {
     const pty = await vmManager.startSession("nvim", terminal.getSize(), "/workspace");
     pillLabelEl.textContent = "nvim";
     terminal.attachPty(pty);
+    if (vmManager.didMemoryFallback()) {
+      const diag = vmManager.getStats();
+      showToast(
+        `浏览器未能分配 ${diag.memoryRequestedMiB} MiB 内存，已自动回退至 ${diag.memoryMiB} MiB`,
+        6000,
+      );
+    }
   } catch (err) {
     bootBarFillEl.classList.remove("indeterminate");
     bootBarFillEl.style.width = "100%";

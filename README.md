@@ -150,7 +150,7 @@ server {
 - **会话切换**：在 `Neovim` 与 `Alpine Shell (/bin/sh)` 之间无缝切换或重启会话。
 - **显示调节**：实时调整 Canvas 终端字号（自动持久化至 `localStorage`）、隐藏/显示悬浮胶囊按钮。
 - **存储与备份**：手动触发 `sync` 落盘、导出当前系统与配置为 `.kwsparse.gz` 备份文件、导入已有备份或恢复出厂镜像。
-- **网络与诊断**：查看 Worker 传输模式（`SharedArrayBuffer`）、WebGL2 状态、JIT 编译块数及磁盘占用，并在**内置同源代理 (`/wisp`)**、**自定义 Wisp 地址**与**离线模式**之间一键切换。
+- **内存与网络诊断**：查看 Worker 传输模式（`SharedArrayBuffer`）、WebGL2 状态、JIT 编译块数及磁盘占用；支持调整虚拟机内存配额（`自动` / `512M` / `1G` / `2G` / `4G` / 自定义 `128–4096 MiB`，亦可通过 URL `?mem=1024` 或 `?mem=2G` 临时指定，分配失败时自动阶梯回退），一键同步落盘并重启生效；支持在**内置同源代理 (`/wisp`)**、**自定义 Wisp 地址**与**离线模式**之间切换。
 
 ### Neovim 常用快捷键（DefectingCat/nvim）
 
@@ -187,7 +187,8 @@ unkernel-nvim/
 │   └── prebake.ts           # 构建期预烘焙脚本 (交叉编译 + 虚拟机无头预热 + 镜像导出)
 ├── src/
 │   ├── main.ts              # 应用入口与生命周期编排
-│   ├── vm-manager.ts        # WorkerKernel 管理、IndexedDB 零下载探测与网络模式配置
+│   ├── memory-config.ts     # 虚拟机内存配额解析、校验与阶梯回退策略
+│   ├── vm-manager.ts        # WorkerKernel 管理、IndexedDB 零下载探测、内存与网络配置
 │   ├── terminal.ts          # WebGL2 终端封装、clay.nvim 配色与 16ms 时间片 PTY 输出泵
 │   ├── fs-bridge.ts         # 浏览器 File System Access API 到 9p Fs 的读写桥接实现
 │   ├── modal.ts             # 控制中心交互逻辑

@@ -3,6 +3,7 @@
 // orchestration, snapshot management, and local directory mounting.
 
 import {
+  autoMemoryMiB,
   checkSupport,
   createKernel,
   decodeSnapshot,
@@ -22,6 +23,12 @@ import {
   type PtyEnd,
 } from "unkernel";
 import { BrowserDirectoryFs } from "./fs-bridge.ts";
+import {
+  MEMORY_FALLBACK_MIB,
+  MEMORY_STORAGE_KEY,
+  parseMemorySpec,
+  type MemoryConfigMiB,
+} from "./memory-config.ts";
 
 export const DISK_NAME = "unkernel-nvim";
 export const DISK_VERSION = "v1";
@@ -140,6 +147,17 @@ function loadInitialNetMode(savedCustomUrl: string): NetMode {
   return savedCustomUrl.trim() ? "custom" : "builtin";
 }
 
+function loadStoredMemoryConfig(): MemoryConfigMiB {
+  const parsed = parseMemorySpec(localStorage.getItem(MEMORY_STORAGE_KEY));
+  return parsed === undefined ? null : parsed;
+}
+
+function loadUrlMemoryOverride(): MemoryConfigMiB | undefined {
+  const param = new URLSearchParams(location.search).get("mem");
+  if (param === null) return undefined;
+  return parseMemorySpec(param);
+}
+
 export class VmManager {
   vm: KernelHandle | null = null;
   activePty: Pty | null = null;
@@ -148,7 +166,57 @@ export class VmManager {
   mountedFolders: Map<string, MountedFolder> = new Map();
   wispUrl: string = localStorage.getItem("unkernel-nvim.wisp") ?? "";
   netMode: NetMode = loadInitialNetMode(this.wispUrl);
+  memoryConfigMiB: MemoryConfigMiB = loadStoredMemoryConfig();
+  urlMemoryOverride: MemoryConfigMiB | undefined = loadUrlMemoryOverride();
+  memoryRequestedMiB: number | null = null;
+  memoryAllocatedMiB: number | null = null;
+  memoryFallbackReasons: string[] = [];
   seededFromCache = false;
+
+  getAutoMemoryInfo(): { mib: number; why: string } {
+    return autoMemoryMiB();
+  }
+
+  getEffectiveMemoryConfig(): MemoryConfigMiB {
+    return this.urlMemoryOverride !== undefined ? this.urlMemoryOverride : this.memoryConfigMiB;
+  }
+
+  getTargetMemoryMiB(): number {
+    return this.getEffectiveMemoryConfig() ?? this.getAutoMemoryInfo().mib;
+  }
+
+  hasUrlMemoryOverride(): boolean {
+    return this.urlMemoryOverride !== undefined;
+  }
+
+  setMemoryConfig(mib: MemoryConfigMiB): void {
+    this.memoryConfigMiB = mib;
+    this.urlMemoryOverride = undefined;
+    if (mib === null) localStorage.removeItem(MEMORY_STORAGE_KEY);
+    else localStorage.setItem(MEMORY_STORAGE_KEY, String(mib));
+
+    const url = new URL(location.href);
+    if (url.searchParams.has("mem")) {
+      url.searchParams.delete("mem");
+      history.replaceState(null, "", url.toString());
+    }
+  }
+
+  didMemoryFallback(): boolean {
+    return (
+      this.memoryRequestedMiB !== null &&
+      this.memoryAllocatedMiB !== null &&
+      this.memoryAllocatedMiB !== this.memoryRequestedMiB
+    );
+  }
+
+  hasPendingMemoryChange(): boolean {
+    if (!this.vm) return false;
+    const nextTarget = this.getTargetMemoryMiB();
+    const runningMiB = this.vm.memoryMiB;
+    const bootedTarget = this.memoryRequestedMiB ?? runningMiB;
+    return nextTarget !== bootedTarget && nextTarget !== runningMiB;
+  }
 
   getEffectiveWispServers(): string[] {
     if (this.netMode === "off") return [];
@@ -252,9 +320,16 @@ export class VmManager {
       } else if (p.stage === "compile") {
         this.#onStatus({ phase: "compile", title: "正在编译 Linux Wasm 内核…" });
       } else if (p.stage === "memory") {
+        this.memoryRequestedMiB = p.requestedMiB;
+        this.memoryAllocatedMiB = p.mib;
+        this.memoryFallbackReasons = [...p.failures];
+        const fellBack = p.mib !== p.requestedMiB;
         this.#onStatus({
           phase: "boot",
-          title: `已分配 ${p.mib} MiB 虚拟机内存，正在引导内核…`,
+          title: fellBack
+            ? `目标 ${p.requestedMiB} MiB 内存分配失败，已自动回退至 ${p.mib} MiB…`
+            : `已分配 ${p.mib} MiB 虚拟机内存，正在引导内核…`,
+          detail: fellBack ? p.failures[0] : undefined,
         });
       } else if (p.stage === "start") {
         this.#onStatus({
@@ -264,16 +339,31 @@ export class VmManager {
       }
     };
 
+    const effectiveMemory = this.getEffectiveMemoryConfig();
+    const targetMemoryMiB = effectiveMemory ?? this.getAutoMemoryInfo().mib;
+    this.memoryRequestedMiB = null;
+    this.memoryAllocatedMiB = null;
+    this.memoryFallbackReasons = [];
+
     this.vm = await createKernel({
       worker: true,
       jit: true,
       vsock: true,
+      ...(effectiveMemory !== null ? { memoryMiB: effectiveMemory } : {}),
+      memoryFallbackMiB: [...MEMORY_FALLBACK_MIB],
       consoleSize: { cols, rows },
       disks: [diskSpec],
       net: netSpec,
       onProgress,
       log: (m) => console.debug(m),
     });
+
+    if (this.memoryAllocatedMiB === null) {
+      this.memoryAllocatedMiB = this.vm.memoryMiB;
+    }
+    if (this.memoryRequestedMiB === null) {
+      this.memoryRequestedMiB = targetMemoryMiB;
+    }
 
     // Sync disk automatically when page becomes hidden
     document.addEventListener("visibilitychange", () => {
@@ -392,6 +482,15 @@ export class VmManager {
     location.reload();
   }
 
+  async syncAndReload(): Promise<void> {
+    await this.syncDisk();
+    if (this.vm instanceof WorkerKernel) {
+      await this.vm.detachDisk(0).catch(() => {});
+      await this.vm.stop().catch(() => {});
+    }
+    location.reload();
+  }
+
   async resetToFactoryDisk(): Promise<void> {
     if (this.vm instanceof WorkerKernel) {
       await this.vm.detachDisk(0).catch(() => {});
@@ -420,6 +519,9 @@ export class VmManager {
   getStats(): {
     transport: string;
     memoryMiB: number;
+    memoryRequestedMiB: number;
+    memoryFallback: boolean;
+    memoryFallbackReason: string | null;
     crossOriginIsolated: boolean;
     stats: InstanceStats | null;
     diskBlocks: number;
@@ -429,9 +531,13 @@ export class VmManager {
     if (this.vm instanceof WorkerKernel && this.vm.disks[0]) {
       diskBlocks = this.vm.disks[0].overlayBlocks ?? 0;
     }
+    const memoryMiB = this.vm?.memoryMiB ?? 0;
     return {
       transport: this.vm?.transport ?? "unknown",
-      memoryMiB: this.vm?.memoryMiB ?? 0,
+      memoryMiB,
+      memoryRequestedMiB: this.memoryRequestedMiB ?? memoryMiB,
+      memoryFallback: this.didMemoryFallback(),
+      memoryFallbackReason: this.memoryFallbackReasons[0] ?? null,
       crossOriginIsolated: globalThis.crossOriginIsolated === true,
       stats,
       diskBlocks,
