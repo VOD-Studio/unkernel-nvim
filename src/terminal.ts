@@ -80,7 +80,7 @@ export class CanvasTerminal {
       rescaleOverlappingGlyphs: true,
       cursorBlink: false,
       cursorStyle: "block",
-      scrollback: 0, // Neovim runs in alternate screen buffer; 0 scrollback saves memory
+      scrollback: 0,
       macOptionIsMeta: true,
       fontSize: savedFontSize,
       lineHeight: 1.18,
@@ -92,6 +92,9 @@ export class CanvasTerminal {
         cursor: CLAY_DARK_PALETTE.clay,
         cursorAccent: CLAY_DARK_PALETTE.bg,
         selectionBackground: CLAY_DARK_PALETTE.selection,
+        scrollbarSliderBackground: CLAY_DARK_PALETTE.subtle,
+        scrollbarSliderHoverBackground: CLAY_DARK_PALETTE.string,
+        scrollbarSliderActiveBackground: CLAY_DARK_PALETTE.clay,
         // ANSI 0..15 mapped per clay.nvim terminal_keys.dark
         black: CLAY_DARK_PALETTE.sidebar,
         red: CLAY_DARK_PALETTE.clay,
@@ -233,13 +236,14 @@ export class CanvasTerminal {
     this.#pty?.write(this.#encoder.encode(text)).catch(() => {});
   }
 
-  attachPty(pty: Pty): void {
+  attachPty(pty: Pty, scrollback = 0): void {
     this.#pumpAbort?.abort();
     const abort = new AbortController();
     this.#pumpAbort = abort;
     this.#pty = pty;
 
     this.term.reset();
+    this.term.options.scrollback = scrollback;
     this.fit();
 
     void this.#pumpOutput(pty, abort.signal);

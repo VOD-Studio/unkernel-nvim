@@ -70,6 +70,20 @@ body {
   background-color: var(--clay-bg) !important;
 }
 
+#terminal-stage .xterm-scrollable-element > .scrollbar.vertical > .slider {
+  /* Inset the visible thumb while keeping xterm's full drag target. */
+  border: solid transparent;
+  border-width: 3px 4px;
+  border-radius: 999px;
+  background-clip: padding-box;
+  cursor: grab;
+  transition: background-color 140ms ease;
+}
+
+#terminal-stage .xterm-scrollable-element > .scrollbar.vertical > .slider.active {
+  cursor: grabbing;
+}
+
 /* Boot Overlay */
 .boot-overlay {
   position: fixed;

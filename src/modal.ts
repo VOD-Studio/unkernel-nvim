@@ -17,6 +17,7 @@ import type { CanvasTerminal } from "./terminal.ts";
 import { getSameOriginWispUrl, type NetMode, type VmManager } from "./vm-manager.ts";
 
 const MODAL_TABS = ["workspace", "storage", "system"] as const;
+const SHELL_SCROLLBACK_LINES = 1_000;
 type ModalTab = (typeof MODAL_TABS)[number];
 type SessionMode = VmManager["currentMode"];
 type DiskAction = "storage" | "restart";
@@ -704,7 +705,7 @@ export class ModalController {
     this.#startingSession = true;
     try {
       const pty = await this.#vmManager.startSession(mode, this.#terminal.getSize(), dir);
-      this.#terminal.attachPty(pty);
+      this.#terminal.attachPty(pty, mode === "shell" ? SHELL_SCROLLBACK_LINES : 0);
       this.#onSessionChange?.(mode);
       this.close();
     } catch (err) {
