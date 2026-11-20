@@ -1,15 +1,15 @@
 # unkernel-nvim
 
-基于 [unkernel](https://github.com/pithings/unkernel)（WebAssembly Linux 7.x 内核 + Alpine `aarch64` JIT）、[DefectingCat/nvim](https://github.com/DefectingCat/nvim) 与 **Bun 1.4** 原生后端构建的全屏浏览器端 Neovim 工作区。在浏览器本地运行完整的 Linux 用户态、原生 Neovim 0.12、LSP 与 Tree-sitter 工具链，并内置零外部依赖的自建 Wisp 联网后端与公网免登录安全防护。
+基于 [unkernel](https://github.com/pithings/unkernel)（WebAssembly Linux 7.x 内核 + `aarch64` JIT）、[DefectingCat/nvim](https://github.com/DefectingCat/nvim) 与 **Bun 1.4** 原生后端构建的全屏浏览器端 Neovim 工作区。在浏览器本地运行 Debian 或 Alpine、Neovim 0.12、LSP 与 Tree-sitter 工具链，并提供自建 Wisp 联网后端。
 
 ---
 
 ## 核心特性
 
-- **真实 Linux 内核与原生用户态**：基于 `unkernel` 在 Web Worker 中运行编译为 WebAssembly 的 Linux 内核，直接执行未经修改的 Alpine Linux 3.24 `aarch64` 二进制程序（`neovim`、`git`、`ripgrep`、`fd`、`lua-language-server`、`stylua`）。
+- **Debian 和 Alpine 用户态**：在 Web Worker 中运行编译为 WebAssembly 的 Linux 内核，执行 `aarch64` 版 `neovim`、`fish`、`git`、`ripgrep`、`fd`、`lua-language-server` 和 `stylua`。首次打开默认进入 Debian，两个发行版默认 Shell 均为 `fish`。
 - **开箱即用的预烘焙环境**：内置 [DefectingCat/nvim](https://github.com/DefectingCat/nvim) 配置、13 款核心插件（`clay.nvim`、`mini.nvim`、`nvim-treesitter`、`neogit`、`codediff.nvim`、`conform.nvim`、`gitsigns.nvim`、`grug-far.nvim` 等）以及 24 个 `aarch64` 原生编译的 Tree-sitter 解析器，构建期已完成 `vim.loader` 字节码预热。
-- **二次启动零下载与 IndexedDB 持久化**：首次访问流式加载约 45 MiB 的压缩稀疏镜像（`nvim-data.kwsparse.gz`）；后续访问自动探测本地 IndexedDB Overlay 磁盘并跳过镜像下载（**0 B 网络传输**）。支持一键落盘同步、`.kwsparse.gz` 磁盘快照导入/导出与出厂重置。
-- **自建 Bun Wisp 后端与公网纵深防御**：基于 Bun 原生 `Bun.serve({ websocket })` 提供同源 `/wisp` 代理，无需前端登录即可在虚拟机内使用 `curl`、`git`、`apk` 和 `:PackUpdate`。同时支持**单进程内置模式**与**网关 + 独立认证 Wisp 分离模式**（仅服务端持有的 `WISP_AUTH_TOKEN` 环境变量认证）。
+- **IndexedDB 持久化**：首次启动时同时编译 Wasm 内核、加载当前发行版的稀疏数据盘模板。后续启动若已存在持久化磁盘，会跳过模板下载。支持落盘同步、`.kwsparse.gz` 备份导入和导出，以及出厂重置。
+- **自建 Bun Wisp 后端与公网纵深防御**：同源 `/wisp` 代理支持虚拟机内的 `curl`、`git`、Debian `apt`、Alpine `apk` 和 `:PackUpdate`。同时支持**单进程内置模式**与**网关 + 独立认证 Wisp 分离模式**（仅服务端持有 `WISP_AUTH_TOKEN`）。
 - **本地目录直通挂载（9p over vsock）**：将浏览器 File System Access API（`showDirectoryPicker`）桥接为 `unkernel` 9p 文件系统，支持将宿主机本地项目目录直接挂载至 `/workspace/<name>` 进行实时读写。
 - **WebGL2 终端与时间片流控**：采用 `@xterm/xterm` v6 + `@xterm/addon-webgl` 全屏渲染，深度适配 [clay.nvim](https://github.com/DefectingCat/clay.nvim) 暗色面板与 `Symbols Nerd Font Mono` 图标字体；内置 16 ms / 256 KiB 时间片 PTY 输出泵（基于 `MessageChannel`），确保高吞吐输出下键鼠输入依然零阻塞。
 
@@ -17,17 +17,22 @@
 
 ## 快速开始（本地开发）
 
-仓库已预置构建好的稀疏磁盘镜像 `public/nvim-data.kwsparse.gz`，安装 **Bun >= 1.4** 后可直接启动：
+安装 **Bun >= 1.4** 后，先生成发行版和 Neovim 数据盘，再启动开发服务器。
 
 ```bash
 # 安装依赖
 bun install
+bun run prebake
 
 # 启动本地开发服务器 (内置同源 /wisp 代理 + COOP/COEP SharedArrayBuffer 零延迟通道)
 bun run dev
 ```
 
 浏览器访问 `http://localhost:5173` 即可进入全屏 Neovim 环境，默认自动通过同源 `/wisp` 联网。
+
+### 切换发行版
+
+打开控制中心的 **虚拟机与诊断 → Linux 发行版**，选择 Debian 或 Alpine，再点击 **同步并重启**。当前浏览器会记住选择。两种发行版各有自己的数据盘，原有 Alpine `v2` 磁盘可以在切回 Alpine 后继续使用。本地目录可分别挂载到两个发行版。
 
 ### 虚拟机多核
 
@@ -45,9 +50,9 @@ bun run dev
 | `bun run start` | 启动 Bun 生产一体化服务器（托管 `dist/` + `/wisp` 内置引擎或认证网关） |
 | `bun run wisp` | 启动独立认证 Wisp 服务（默认强制校验 `WISP_AUTH_TOKEN`） |
 | `bun test` | 运行安全原语、网关认证、SSRF 防护与 Wisp 端到端测试 |
-| `bun run prebake` | 重新构建 Alpine `aarch64` + Neovim 预烘焙磁盘镜像（同时生成 `public/alpine.erofs`） |
+| `bun run prebake [debian\|alpine]` | 在 `public/` 生成两个发行版的镜像和数据盘。指定发行版时只生成该发行版 |
 
-> **提示**：执行 `bun run prebake` 需要宿主机安装 **Bun >= 1.4**（内置 WebAssembly JSPI 支持）、`git`、`curl` 以及 **Zig**（用于通过 `zig cc` 将 `codediff.nvim` 的 `libvscode_diff.so` 与额外 Tree-sitter 解析器交叉编译至 `aarch64-linux-musl`）。
+> 预烘焙需要宿主机安装 **Bun >= 1.4**、`git`、`curl`、`tar`、`unzip` 和 **Zig**。Debian 的原生插件和解析器面向 glibc 编译，Alpine 使用 musl。
 
 ---
 
@@ -80,6 +85,8 @@ cp .env.example .env
 # 编辑 .env，将 WISP_AUTH_TOKEN 替换为 `openssl rand -hex 32` 生成的随机值
 
 # 2. 启动独立认证 Wisp + 应用网关服务 (默认监听 127.0.0.1:3000)
+bun install --frozen-lockfile
+bun run prebake
 docker compose up -d --build
 ```
 
@@ -89,6 +96,7 @@ docker compose up -d --build
 
 ```bash
 bun install
+bun run prebake
 bun run build
 NODE_ENV=production TRUST_PROXY=true PORT=3000 bun run start
 ```
@@ -97,7 +105,7 @@ NODE_ENV=production TRUST_PROXY=true PORT=3000 bun run start
 
 | 环境变量 | 默认值 | 说明 |
 | :--- | :--- | :--- |
-| `NODE_ENV` | `development` | 设为 `production` 时默认开启面向 Neovim/Alpine 的公网安全域名白名单 |
+| `NODE_ENV` | `development` | 设为 `production` 时默认启用 Neovim 和发行版软件源的公网域名白名单 |
 | `PORT` / `WISP_PORT` | `3000` / `6680` | 应用服务器端口 / 独立 Wisp 服务端口 |
 | `TRUST_PROXY` | `false` | 位于 Nginx / Caddy / Cloudflare 后时设为 `true` |
 | `WISP_UPSTREAM_URL` | *(空)* | 填入独立 Wisp 地址（如 `ws://wisp:6680/wisp`）即启用网关认证转发模式 |
@@ -107,7 +115,9 @@ NODE_ENV=production TRUST_PROXY=true PORT=3000 bun run start
 | `WISP_ALLOWED_HOSTS` | 生产白名单 / 开发 `*` | 出口目标域名白名单，支持 `*.githubusercontent.com` 通配符或 `*` |
 | `WISP_ALLOWED_PORTS` | `80,443` | 出口目标端口白名单（设为 `*` 仍默认屏蔽 `25/465/587` 邮件端口） |
 | `WISP_ALLOW_PRIVATE` | `false` | 是否允许访问内网/回环/云元数据 IP（**公网务必保持 `false`**） |
-| `WISP_OUTBOUND_PROXY` | *(空)* | 可选：服务器出网需走上游 HTTP CONNECT 代理时填入（如 `http://127.0.0.1:7890`） |
+| `WISP_OUTBOUND_PROXY` | *(自动读取环境代理)* | 可选：显式指定上游 HTTP CONNECT 代理（如 `http://127.0.0.1:7890`）；留空时默认读取 `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`（仅 `http/https`）与 `NO_PROXY` |
+| `WISP_USE_ENV_PROXY` | `true` | 是否允许从环境变量自动读取代理与 `NO_PROXY`；设为 `false` 可强制直连 |
+| `WISP_NO_PROXY` | *(读取 `NO_PROXY`)* | 逗号分隔的直连目标列表，匹配后绕过上游代理 |
 
 ### HTTPS 反向代理示例（必须 HTTPS 以启用 SharedArrayBuffer 与本地目录挂载）
 
@@ -152,9 +162,9 @@ server {
 
 在终端内按下 **`⌘ + Shift + P`**（macOS）或 **`Ctrl + Shift + P`**（Windows / Linux），或点击右上角悬浮胶囊，即可打开**控制中心**。焦点在标签栏时可用左右方向键切换标签页，按 `Esc` 返回终端。
 
-- **工作区与会话**：在 Chromium 浏览器中挂载本地文件夹，打开 `/workspace` 或 `~/.config/nvim`，切换或重启 Neovim 和 Alpine Shell，也可调整终端字号和悬浮快捷入口。
+- **工作区与会话**：在 Chromium 浏览器中挂载本地文件夹，打开 `/workspace` 或 `~/.config/nvim`，切换或重启 Neovim 和当前发行版的 Shell，也可调整终端字号和悬浮快捷入口。
 - **存储与备份**：手动同步磁盘，导入或导出 `.kwsparse.gz` 备份，或确认后恢复出厂镜像。
-- **虚拟机与诊断**：查看 Worker 传输模式、WebGL2、JIT 编译块数和磁盘占用。内存配额支持自动、预设档位、自定义 `128–4096 MiB`，也可通过 `?mem=1024` 或 `?mem=2G` 临时指定。联网支持内置同源代理 `/wisp`、自定义 Wisp 地址和离线模式。内存或网络配置有待生效的改动时，底部会提供「同步并重启」。
+- **虚拟机与诊断**：切换发行版、调整核数、内存配额和 Wisp 网络，查看实际在线核数、Worker 传输模式、WebGL2 和 JIT。内存支持自动、预设档位、自定义 `128–4096 MiB` 和临时 URL 参数 `?mem=2G`。配置变更后可点击「同步并重启」应用。
 
 ### Neovim 常用快捷键（DefectingCat/nvim）
 
@@ -178,8 +188,10 @@ unkernel-nvim/
 ├── docker-compose.yml       # 公网推荐双服务编排（应用网关 + 内部网络认证 Wisp）
 ├── public/
 │   ├── fonts/               # 预加载的 Symbols Nerd Font Mono 图标字体
-│   ├── alpine.erofs         # Alpine aarch64 只读根发行版镜像 (由 prebake 生成)
-│   └── nvim-data.kwsparse.gz # 预烘焙的 Alpine aarch64 + Neovim 稀疏磁盘镜像
+│   ├── debian.erofs         # Debian aarch64 只读根镜像，由 prebake 生成
+│   ├── alpine.erofs         # Alpine aarch64 只读根镜像，由 prebake 生成
+│   ├── nvim-data-debian.kwsparse.gz # Debian 的 Neovim 数据盘模板
+│   └── nvim-data.kwsparse.gz        # Alpine 的 Neovim 数据盘模板
 ├── server/
 │   ├── config.ts            # 环境变量解析与安全默认策略
 │   ├── security.ts          # Bearer Token 校验、无感 HMAC Cookie、Origin、反 SSRF、限流
@@ -192,6 +204,7 @@ unkernel-nvim/
 │   └── prebake.ts           # 构建期预烘焙脚本 (交叉编译 + 虚拟机无头预热 + 镜像导出)
 ├── src/
 │   ├── main.ts              # 应用入口与生命周期编排
+│   ├── distro.ts            # 发行版与磁盘配置
 │   ├── memory-config.ts     # 虚拟机内存配额解析、校验与阶梯回退策略
 │   ├── vm-manager.ts        # WorkerKernel 管理、IndexedDB 零下载探测、内存与网络配置
 │   ├── terminal.ts          # WebGL2 终端封装、clay.nvim 配色与 16ms 时间片 PTY 输出泵

@@ -22,6 +22,8 @@ services:
       WISP_ALLOWED_PORTS: ${WISP_ALLOWED_PORTS:-80,443}
       WISP_ALLOW_PRIVATE: ${WISP_ALLOW_PRIVATE:-false}
       WISP_OUTBOUND_PROXY: ${WISP_OUTBOUND_PROXY:-}
+      WISP_USE_ENV_PROXY: ${WISP_USE_ENV_PROXY:-true}
+      WISP_NO_PROXY: ${WISP_NO_PROXY:-}
     # Not published to the host network — reachable only from the `app` gateway inside Docker.
     networks:
       - wisp_internal

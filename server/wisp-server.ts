@@ -3,7 +3,7 @@
 // Designed to run behind the app server gateway on an internal network or VPS,
 // authenticated strictly via server-side `WISP_AUTH_TOKEN` (Authorization: Bearer).
 
-import { loadConfig, type ServerConfig } from "./config.ts";
+import { formatProxyForLog, loadConfig, type ServerConfig } from "./config.ts";
 import { getClientIp, IpRateLimiter, verifyBearerToken } from "./security.ts";
 import { createWispEngine, createWispSocketData, type WispSocketData } from "./wisp-core.ts";
 
@@ -80,9 +80,10 @@ export function startStandaloneWispServer(overrides: Partial<ServerConfig> = {})
 
   const hostPolicy = config.allowedHosts.includes("*") ? "* (all public hosts)" : `${config.allowedHosts.length} host rules`;
   const portPolicy = config.allowedPorts === "*" ? "* (non-SMTP)" : config.allowedPorts.join(",");
+  const proxyPolicy = config.outboundProxy ? `, proxy=${formatProxyForLog(config.outboundProxy)}` : "";
   console.log(
     `[wisp-server] listening on ws://${server.hostname}:${server.port}${config.wispPath} ` +
-      `(auth=${config.wispAuthToken ? "bearer-token" : "DISABLED"}, hosts=${hostPolicy}, ports=${portPolicy}, privateIps=${config.allowPrivateIps})`,
+      `(auth=${config.wispAuthToken ? "bearer-token" : "DISABLED"}, hosts=${hostPolicy}, ports=${portPolicy}, privateIps=${config.allowPrivateIps}${proxyPolicy})`,
   );
 
   return {

@@ -318,6 +318,64 @@ export function isHostAllowed(hostname: string, allowedHosts: readonly string[])
   return false;
 }
 
+/**
+ * Standard NO_PROXY matching for bypassing an outbound HTTP CONNECT proxy.
+ * Supports `*`, exact IP/hostname, optional `:port` (including `[::1]:port`),
+ * and domain suffixes (`example.com`, `.example.com`, `*.example.com`).
+ */
+export function shouldBypassProxy(hostname: string, port: number, noProxy: readonly string[]): boolean {
+  if (noProxy.length === 0) return false;
+  const host = hostname.trim().toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (!host) return false;
+  const hostIsIp = isIP(host) !== 0;
+
+  for (const rawEntry of noProxy) {
+    const entry = rawEntry.trim().toLowerCase();
+    if (!entry) continue;
+    if (entry === "*") return true;
+
+    let patternHost = entry;
+    let patternPort: number | null = null;
+
+    if (entry.startsWith("[")) {
+      const m = /^\[([^\]]+)\](?::(\d+))?$/.exec(entry);
+      if (!m?.[1]) continue;
+      patternHost = m[1];
+      if (m[2]) patternPort = Number.parseInt(m[2], 10);
+    } else {
+      const firstColon = entry.indexOf(":");
+      const lastColon = entry.lastIndexOf(":");
+      if (firstColon !== -1 && firstColon === lastColon) {
+        const maybePort = entry.slice(firstColon + 1);
+        if (/^\d+$/.test(maybePort)) {
+          patternHost = entry.slice(0, firstColon);
+          patternPort = Number.parseInt(maybePort, 10);
+        }
+      }
+    }
+
+    if (patternPort !== null && patternPort !== port) continue;
+    patternHost = patternHost.replace(/\.$/, "");
+    if (!patternHost) continue;
+    if (patternHost === "*") return true;
+    if (host === patternHost) return true;
+
+    if (hostIsIp || isIP(patternHost) !== 0) continue;
+
+    if (patternHost.startsWith("*.")) {
+      const suffix = patternHost.slice(1); // ".example.com"
+      if (host.endsWith(suffix) && host.length > suffix.length) return true;
+    } else if (patternHost.startsWith(".")) {
+      const bare = patternHost.slice(1);
+      if (host === bare || host.endsWith(patternHost)) return true;
+    } else if (host.endsWith(`.${patternHost}`)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export type ResolveResult =
   | { ok: true; address: string; family: 4 | 6 }
   | { ok: false; code: "blocked" | "unreachable"; reason: string };

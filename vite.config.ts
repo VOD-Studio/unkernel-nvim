@@ -8,7 +8,7 @@ import type { IncomingMessage } from "node:http";
 import { createConnection } from "node:net";
 import type { Duplex } from "node:stream";
 import { defineConfig, type Connect, type Plugin } from "vite";
-import { loadConfig } from "./server/config.ts";
+import { formatProxyForLog, loadConfig } from "./server/config.ts";
 import {
   buildSessionSetCookieHeader,
   getClientIp,
@@ -154,9 +154,10 @@ function attachDevWisp(
     backend.stop(true);
   });
 
+  const proxySuffix = config.outboundProxy ? ` (proxy=${formatProxyForLog(config.outboundProxy)})` : "";
   console.log(
     `[vite-wisp] mounted ${config.wispPath} -> ${
-      mode === "gateway" ? `gateway(${config.wispUpstreamUrl})` : "builtin Bun Wisp engine"
+      mode === "gateway" ? `gateway(${config.wispUpstreamUrl})` : `builtin Bun Wisp engine${proxySuffix}`
     }`,
   );
 }

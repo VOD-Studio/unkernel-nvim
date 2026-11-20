@@ -4,13 +4,16 @@
 
 import {
   autoMemoryMiB,
+  bundledKernelUrl,
   checkSupport,
   createKernel,
   decodeSnapshot,
+  download,
   encodeSnapshot,
   gzipBlob,
   importDataDisk,
   kwsparseHeader,
+  loadKernelModule,
   resetDataDisk,
   webCpuBlocker,
   WorkerKernel,
@@ -23,6 +26,7 @@ import {
   type Pty,
   type PtyEnd,
 } from "unkernel";
+import { DEFAULT_DISTRO, DISTROS, isDistro, type Distro } from "./distro.ts";
 import { BrowserDirectoryFs } from "./fs-bridge.ts";
 import {
   MEMORY_FALLBACK_MIB,
@@ -31,16 +35,15 @@ import {
   type MemoryConfigMiB,
 } from "./memory-config.ts";
 
-export const DISK_NAME = "unkernel-nvim";
-export const DISK_VERSION = "v2"; // v2: aarch64 + unkernel 0.2.0 distro overlay layout
-export const DISK_SIZE_BYTES = 4 * 1024 * 1024 * 1024; // 4 GiB kwdata template size
-export const DISTRO_URL = "/alpine.erofs";
-export const PREBAKED_DISK_URL = "/nvim-data.kwsparse.gz";
+const DISK_VERSION = "v2"; // aarch64 + unkernel 0.2.0 distro overlay layout
+const DISK_SIZE_BYTES = 4 * 1024 * 1024 * 1024;
+const DEFAULT_SHELL = "/usr/bin/fish";
+const FALLBACK_SHELL = "/bin/sh";
 const CPU_STORAGE_KEY = "unkernel-nvim.cpus";
-const MAX_CPUS = 16; // CONFIG_NR_CPUS in the bundled SMP kernel
+const DISTRO_STORAGE_KEY = "unkernel-nvim.distro";
+const MAX_CPUS = 16; // CONFIG_NR_CPUS in the upstream SMP kernel
 const SNAPSHOT_DB_NAME = "unkernel-nvim-snapshots";
 const SNAPSHOT_STORE = "snapshots";
-const SNAPSHOT_KEY = "latest";
 
 export interface BootStatusUpdate {
   phase: "check" | "disk-check" | "disk-download" | "compile" | "boot" | "userspace" | "ready";
@@ -56,14 +59,13 @@ export interface MountedFolder {
 }
 
 /**
- * Fast probe of IndexedDB `kwdisk:unkernel-nvim-v2` to check whether the
+ * Fast probe of the distro's IndexedDB disk to check whether the
  * persistent data disk has already been seeded on a previous visit.
- * When true, we pass a 24-byte empty kwsparse header as `template`, skipping
- * the prebaked `/nvim-data.kwsparse.gz` download completely!
+ * An initialized disk only needs a size-matched empty template.
  */
-export async function isDataDiskSeeded(): Promise<boolean> {
+async function isDataDiskSeeded(name: string): Promise<boolean> {
   if (typeof indexedDB === "undefined") return false;
-  const dbName = `kwdisk:${DISK_NAME}-${DISK_VERSION}`;
+  const dbName = `kwdisk:${name}-${DISK_VERSION}`;
   return new Promise<boolean>((resolve) => {
     try {
       const req = indexedDB.open(dbName, 1);
@@ -102,40 +104,6 @@ export async function isDataDiskSeeded(): Promise<boolean> {
   });
 }
 
-async function fetchTemplateWithProgress(
-  url: string,
-  onProgress: (loaded: number, total: number | null) => void,
-): Promise<Uint8Array> {
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`下载预烘焙镜像失败 (${res.status} ${res.statusText}): 请确认已执行 bun run prebake 生成 public/nvim-data.kwsparse.gz`);
-  }
-  const totalHeader = res.headers.get("content-length");
-  const total = totalHeader ? Number(totalHeader) : null;
-  if (!res.body) {
-    const buf = new Uint8Array(await res.arrayBuffer());
-    onProgress(buf.byteLength, buf.byteLength);
-    return buf;
-  }
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let loaded = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    loaded += value.byteLength;
-    onProgress(loaded, total);
-  }
-  const out = new Uint8Array(loaded);
-  let offset = 0;
-  for (const c of chunks) {
-    out.set(c, offset);
-    offset += c.byteLength;
-  }
-  return out;
-}
-
 export type NetMode = "builtin" | "custom" | "off";
 
 export function getSameOriginWispUrl(): string {
@@ -162,6 +130,11 @@ function loadUrlMemoryOverride(): MemoryConfigMiB | undefined {
   return parseMemorySpec(param);
 }
 
+function loadDistro(): Distro {
+  const value = localStorage.getItem(DISTRO_STORAGE_KEY);
+  return isDistro(value) ? value : DEFAULT_DISTRO;
+}
+
 export class VmManager {
   vm: KernelHandle | null = null;
   activePty: Pty | null = null;
@@ -173,15 +146,43 @@ export class VmManager {
   #bootedNetwork: { mode: NetMode; servers: string[] } | null = null;
   readonly cpuBlocker = webCpuBlocker({ worker: true });
   readonly cpuLimit = this.cpuBlocker ? 1 : Math.min(navigator.hardwareConcurrency || 1, MAX_CPUS);
+  #distro = loadDistro();
+  #bootDistro: Distro | null = null;
   #cpuCount = this.#loadCpuCount();
   #bootCpuCount: number | null = null;
   #onlineCpuCount: number | null = null;
+  #shellPath: string | null = null;
   memoryConfigMiB: MemoryConfigMiB = loadStoredMemoryConfig();
   urlMemoryOverride: MemoryConfigMiB | undefined = loadUrlMemoryOverride();
   memoryRequestedMiB: number | null = null;
   memoryAllocatedMiB: number | null = null;
   memoryFallbackReasons: string[] = [];
   seededFromCache = false;
+
+  get distro(): Distro {
+    return this.#distro;
+  }
+
+  get activeDistro(): Distro {
+    return this.#bootDistro ?? this.#distro;
+  }
+
+  get shellPath(): string {
+    return this.#shellPath ?? DEFAULT_SHELL;
+  }
+
+  get shellName(): string {
+    return this.shellPath.split("/").pop() || "sh";
+  }
+
+  setDistro(distro: Distro): void {
+    localStorage.setItem(DISTRO_STORAGE_KEY, distro);
+    this.#distro = distro;
+  }
+
+  hasPendingDistroChange(): boolean {
+    return this.activeDistro !== this.#distro;
+  }
 
   #loadCpuCount(): number {
     const stored = Number(localStorage.getItem(CPU_STORAGE_KEY));
@@ -266,7 +267,8 @@ export class VmManager {
   }
 
   hasPendingRestartChanges(): boolean {
-    return this.hasPendingCpuChange() || this.hasPendingMemoryChange() || this.hasPendingNetworkChange();
+    return this.hasPendingDistroChange() || this.hasPendingCpuChange() ||
+      this.hasPendingMemoryChange() || this.hasPendingNetworkChange();
   }
 
   setNetworkConfig(mode: NetMode, customUrl?: string): void {
@@ -291,7 +293,50 @@ export class VmManager {
     this.#onSessionExit = opts.onSessionExit;
   }
 
+  async #prepareDataDisk(distro: Distro, signal: AbortSignal): Promise<Uint8Array> {
+    const { diskName, label, template } = DISTROS[distro];
+    this.#onStatus({ phase: "disk-check", title: `检查 ${label} 持久化磁盘…` });
+    this.seededFromCache = await isDataDiskSeeded(diskName);
+    signal.throwIfAborted();
+    let bytes: Uint8Array;
+    if (this.seededFromCache) {
+      bytes = kwsparseHeader(DISK_SIZE_BYTES, 4096, []);
+    } else {
+      const title = `首次启动：正在加载 ${label} 的 Neovim 镜像…`;
+      this.#onStatus({ phase: "disk-download", title, progress: 0 });
+      let lastUpdate = performance.now();
+      try {
+        bytes = await download(template, {
+          signal,
+          onProgress: ({ loaded, total, done }) => {
+            const now = performance.now();
+            if (!done && now - lastUpdate < 50) return;
+            lastUpdate = now;
+            const mib = (loaded / 1048576).toFixed(1);
+            this.#onStatus({
+              phase: "disk-download",
+              title,
+              detail: total ? `${mib} / ${(total / 1048576).toFixed(1)} MiB` : `${mib} MiB`,
+              progress: total ? Math.min(1, loaded / total) : undefined,
+            });
+          },
+        });
+      } catch (err) {
+        throw new Error(`无法下载 ${label} 磁盘模板 (${template})，请确认已执行 bun run prebake ${distro}。`, { cause: err });
+      }
+    }
+    this.#onStatus({
+      phase: "compile",
+      title: "正在准备 Linux Wasm 内核…",
+      detail: this.seededFromCache ? `已找到 ${label} 持久化磁盘` : `${label} 数据盘已下载`,
+    });
+    return bytes;
+  }
+
   async boot(cols: number, rows: number): Promise<void> {
+    const distro = this.#distro;
+    const { diskName, image, label } = DISTROS[distro];
+    this.#bootDistro = distro;
     const cpus = this.#cpuCount;
     this.#bootCpuCount = cpus;
     this.#onlineCpuCount = null;
@@ -301,41 +346,23 @@ export class VmManager {
       throw new Error(`当前浏览器缺少必要特性:\n${support.problems.join("\n")}`);
     }
 
-    this.#onStatus({ phase: "disk-check", title: "检查本地 IndexedDB 持久化镜像…" });
-    const alreadySeeded = await isDataDiskSeeded();
-    this.seededFromCache = alreadySeeded;
-
+    // Download the kernel while probing or fetching the distro's data disk.
+    const loading = new AbortController();
+    let kernel: WebAssembly.Module;
     let templateBytes: Uint8Array;
-    if (alreadySeeded) {
-      // 24-byte empty kwsparse header with matching 4 GiB size: zero download!
-      templateBytes = kwsparseHeader(DISK_SIZE_BYTES, 4096, []);
-      this.#onStatus({
-        phase: "compile",
-        title: "已命中本地持久化磁盘，跳过镜像下载",
-        detail: "0 B 下载 · 直接挂载 IndexedDB",
-      });
-    } else {
-      this.#onStatus({
-        phase: "disk-download",
-        title: "首次启动：正在加载预烘焙 Neovim + Alpine 镜像…",
-        detail: "包含 Neovim 0.12.2、DefectingCat/nvim、13 个插件、24 个 Treesitter 解析器与 LuaLS",
-        progress: 0,
-      });
-      templateBytes = await fetchTemplateWithProgress(PREBAKED_DISK_URL, (loaded, total) => {
-        const mb = (loaded / 1048576).toFixed(1);
-        const totalMb = total ? (total / 1048576).toFixed(1) : null;
-        this.#onStatus({
-          phase: "disk-download",
-          title: "首次启动：正在加载预烘焙 Neovim + Alpine 镜像…",
-          detail: totalMb ? `${mb} / ${totalMb} MiB` : `${mb} MiB`,
-          progress: total ? Math.min(1, loaded / total) : undefined,
-        });
-      });
+    try {
+      [kernel, templateBytes] = await Promise.all([
+        loadKernelModule(bundledKernelUrl, { smp: cpus > 1, signal: loading.signal }),
+        this.#prepareDataDisk(distro, loading.signal),
+      ]);
+    } catch (err) {
+      loading.abort();
+      throw err;
     }
 
     const diskSpec: DiskSpec = {
       kind: "data",
-      name: DISK_NAME,
+      name: diskName,
       version: DISK_VERSION,
       template: templateBytes,
       mode: "persistent",
@@ -356,16 +383,7 @@ export class VmManager {
         : undefined;
 
     const onProgress = (p: BootProgress) => {
-      if (p.stage === "download") {
-        const mb = (p.loaded / 1048576).toFixed(1);
-        this.#onStatus({
-          phase: "compile",
-          title: "正在流式加载并编译 Linux Wasm 内核…",
-          detail: `${mb} MiB`,
-        });
-      } else if (p.stage === "compile") {
-        this.#onStatus({ phase: "compile", title: "正在编译 Linux Wasm 内核…" });
-      } else if (p.stage === "memory") {
+      if (p.stage === "memory") {
         this.memoryRequestedMiB = p.requestedMiB;
         this.memoryAllocatedMiB = p.mib;
         this.memoryFallbackReasons = [...p.failures];
@@ -380,7 +398,7 @@ export class VmManager {
       } else if (p.stage === "start") {
         this.#onStatus({
           phase: "boot",
-          title: alreadySeeded ? "正在挂载持久化 Overlay 根文件系统…" : "正在写入首次持久化缓存并引导 Alpine…",
+          title: this.seededFromCache ? `正在挂载 ${label} 持久化磁盘…` : `正在初始化持久化磁盘并引导 ${label}…`,
         });
       }
     };
@@ -391,9 +409,10 @@ export class VmManager {
     this.memoryAllocatedMiB = null;
     this.memoryFallbackReasons = [];
 
-    this.vm = await createKernel({
+    const vm = await createKernel({
+      kernel,
       worker: true,
-      distro: DISTRO_URL,
+      distro: image,
       cpus,
       jit: true,
       vsock: true,
@@ -405,14 +424,18 @@ export class VmManager {
       onProgress,
       log: (m) => console.debug(m),
     });
+    this.vm = vm;
     this.#bootedNetwork = network;
+    this.#shellPath = null;
+    void this.#resolveShell(vm);
 
     if (cpus > 1) {
-      const result = await this.vm.exec("/usr/bin/nproc", [], { signal: AbortSignal.timeout(2000) }).catch(() => null);
-      const online = Number(result?.stdout.trim());
-      if (result?.exitCode === 0 && Number.isInteger(online) && online >= 1 && online <= cpus) {
-        this.#onlineCpuCount = online;
-      }
+      void vm.exec("/usr/bin/nproc", [], { signal: AbortSignal.timeout(2000) }).then((result) => {
+        const online = Number(result.stdout.trim());
+        if (this.vm === vm && result.exitCode === 0 && Number.isInteger(online) && online >= 1 && online <= cpus) {
+          this.#onlineCpuCount = online;
+        }
+      }).catch(() => {});
     }
 
     if (this.memoryAllocatedMiB === null) {
@@ -433,6 +456,27 @@ export class VmManager {
     });
   }
 
+  async #resolveShell(vm: KernelHandle | null = this.vm): Promise<string> {
+    if (!vm) return FALLBACK_SHELL;
+    if (this.vm === vm && this.#shellPath === DEFAULT_SHELL) {
+      return DEFAULT_SHELL;
+    }
+    try {
+      const res = await vm.exec("/bin/sh", ["-c", `test -x ${DEFAULT_SHELL}`], {
+        user: "root",
+        signal: AbortSignal.timeout(2000),
+      });
+      const resolved = res.exitCode === 0 ? DEFAULT_SHELL : FALLBACK_SHELL;
+      if (this.vm === vm) this.#shellPath = resolved;
+      return resolved;
+    } catch {
+      if (this.vm === vm && this.#shellPath === null) {
+        this.#shellPath = FALLBACK_SHELL;
+      }
+      return this.#shellPath ?? FALLBACK_SHELL;
+    }
+  }
+
   async startSession(
     mode: "nvim" | "shell",
     size: { cols: number; rows: number; xpixel?: number; ypixel?: number },
@@ -446,14 +490,15 @@ export class VmManager {
     }
 
     const cwd = targetPath ?? this.currentCwd;
+    const shell = await this.#resolveShell(this.vm);
 
     this.#onStatus({
       phase: "userspace",
-      title: mode === "nvim" ? "正在启动 Neovim…" : "正在启动 Alpine Shell…",
+      title: mode === "nvim" ? "正在启动 Neovim…" : `正在启动 ${DISTROS[this.activeDistro].label} Shell…`,
       detail: cwd,
     });
 
-    const file = mode === "nvim" ? "/usr/bin/nvim" : "/bin/sh";
+    const file = mode === "nvim" ? "/usr/bin/nvim" : shell;
     const args = mode === "nvim" ? [] : ["-l"];
 
     const pty = await this.vm.spawn(file, args, {
@@ -468,6 +513,7 @@ export class VmManager {
         HOME: "/root",
         USER: "root",
         LOGNAME: "root",
+        SHELL: shell,
         TERM: "xterm-256color",
         COLORTERM: "truecolor",
         LANG: "C.UTF-8",
@@ -520,7 +566,7 @@ export class VmManager {
     await this.syncDisk();
     const { parts, blocks } = await this.vm.exportDisk(0);
     const blob = await gzipBlob(parts);
-    const name = `unkernel-nvim-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.kwsparse.gz`;
+    const name = `unkernel-nvim-${this.activeDistro}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.kwsparse.gz`;
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = name;
@@ -537,7 +583,7 @@ export class VmManager {
       await this.vm.detachDisk(0).catch(() => {});
       await this.vm.stop().catch(() => {});
     }
-    await importDataDisk(bytes, { name: DISK_NAME, version: DISK_VERSION, size: DISK_SIZE_BYTES });
+    await importDataDisk(bytes, { name: DISTROS[this.activeDistro].diskName, version: DISK_VERSION, size: DISK_SIZE_BYTES });
     location.reload();
   }
 
@@ -545,8 +591,8 @@ export class VmManager {
     const vm = this.vm;
     if (vm) {
       if (!(await this.syncDisk())) throw new Error("磁盘同步未完成，请重试");
-      // Alpine clears the overlay boot counter during an orderly shutdown.
-      vm.write("poweroff\n");
+      // The guest clears the overlay boot counter during an orderly shutdown.
+      void vm.exec("/usr/local/sbin/poweroff", [], { user: "root" }).catch(() => {});
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
@@ -567,7 +613,7 @@ export class VmManager {
       await this.vm.detachDisk(0).catch(() => {});
       await this.vm.stop().catch(() => {});
     }
-    await resetDataDisk({ name: DISK_NAME, version: DISK_VERSION });
+    await resetDataDisk({ name: DISTROS[this.activeDistro].diskName, version: DISK_VERSION });
     await this.clearSnapshot().catch(() => {});
     location.reload();
   }
@@ -582,12 +628,12 @@ export class VmManager {
     }
     const snap = await this.vm.snapshot({ stop: false });
     const encoded = encodeSnapshot(snap);
-    await saveSnapshotBytes(encoded);
+    await saveSnapshotBytes(snapshotKey(this.activeDistro), encoded);
     return { bytes: encoded.byteLength };
   }
 
   async clearSnapshot(): Promise<void> {
-    await deleteSnapshotBytes();
+    await deleteSnapshotBytes(snapshotKey(this.activeDistro));
   }
 
   getStats(): {
@@ -632,12 +678,16 @@ function openSnapshotDb(): Promise<IDBDatabase> {
   });
 }
 
-async function saveSnapshotBytes(bytes: Uint8Array): Promise<void> {
+function snapshotKey(distro: Distro): string {
+  return distro === "alpine" ? "latest" : distro;
+}
+
+async function saveSnapshotBytes(key: string, bytes: Uint8Array): Promise<void> {
   const db = await openSnapshotDb();
   try {
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(SNAPSHOT_STORE, "readwrite");
-      tx.objectStore(SNAPSHOT_STORE).put(bytes, SNAPSHOT_KEY);
+      tx.objectStore(SNAPSHOT_STORE).put(bytes, key);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
@@ -646,12 +696,12 @@ async function saveSnapshotBytes(bytes: Uint8Array): Promise<void> {
   }
 }
 
-async function deleteSnapshotBytes(): Promise<void> {
+async function deleteSnapshotBytes(key: string): Promise<void> {
   const db = await openSnapshotDb();
   try {
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(SNAPSHOT_STORE, "readwrite");
-      tx.objectStore(SNAPSHOT_STORE).delete(SNAPSHOT_KEY);
+      tx.objectStore(SNAPSHOT_STORE).delete(key);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });

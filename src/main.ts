@@ -2,6 +2,7 @@
 // Application entry point: wires the fullscreen WebGL2 Canvas terminal,
 // WorkerKernel VM manager, boot progress overlay, and modal control center.
 
+import { DISTROS } from "./distro.ts";
 import { ModalController } from "./modal.ts";
 import { CanvasTerminal } from "./terminal.ts";
 import { VmManager, type BootStatusUpdate } from "./vm-manager.ts";
@@ -98,12 +99,13 @@ modal = new ModalController({
   terminal,
   toast: showToast,
   onSessionChange: (mode) => {
-    pillLabelEl.textContent = mode === "nvim" ? "nvim" : "sh";
+    pillLabelEl.textContent = mode === "nvim" ? "nvim" : vmManager.shellName;
   },
 });
 
 async function bootApp(): Promise<void> {
   try {
+    bootDetailEl.textContent = `${DISTROS[vmManager.distro].label} · DefectingCat/nvim`;
     bootBadgeEl.textContent = globalThis.crossOriginIsolated
       ? "aarch64 · SharedArrayBuffer"
       : "aarch64 · Worker";

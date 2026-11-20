@@ -9,6 +9,8 @@ export const DEFAULT_PROD_ALLOWED_HOSTS: readonly string[] = [
   "*.githubusercontent.com",
   "dl-cdn.alpinelinux.org",
   "*.alpinelinux.org",
+  "deb.debian.org",
+  "security.debian.org",
   "gitlab.com",
   "*.gitlab.com",
   "codeberg.org",
@@ -45,6 +47,7 @@ export interface ServerConfig {
   allowedPorts: "*" | number[];
   allowPrivateIps: boolean;
   outboundProxy: string;
+  noProxy: string[];
 
   // Rate limits & resource quotas
   maxConnectionsPerIp: number;
@@ -98,6 +101,42 @@ function normalizePath(p: string | undefined, fallback: string): string {
   return withLead.endsWith("/") ? withLead.slice(0, -1) : withLead;
 }
 
+const ENV_PROXY_KEYS = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] as const;
+
+function normalizeHttpProxyUrl(raw: string | undefined): string {
+  const value = raw?.trim();
+  if (!value) return "";
+  const candidate = value.includes("://") ? value : `http://${value}`;
+  try {
+    const parsed = new URL(candidate);
+    if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !parsed.hostname) {
+      return "";
+    }
+    return candidate;
+  } catch {
+    return "";
+  }
+}
+
+function pickEnvHttpProxy(env: Record<string, string | undefined>): string {
+  for (const key of ENV_PROXY_KEYS) {
+    const normalized = normalizeHttpProxyUrl(env[key]);
+    if (normalized) return normalized;
+  }
+  return "";
+}
+
+/** Return a credential-safe proxy representation for startup logs. */
+export function formatProxyForLog(proxyUrl: string): string {
+  if (!proxyUrl) return "";
+  try {
+    const parsed = new URL(proxyUrl);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return "<configured>";
+  }
+}
+
 export function loadConfig(env: Record<string, string | undefined> = process.env): ServerConfig {
   const isProduction = env.NODE_ENV === "production";
 
@@ -111,11 +150,21 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 
   const sessionSecret = env.SESSION_SECRET?.trim() || randomBytes(32).toString("hex");
 
-  const outboundProxy =
-    env.WISP_OUTBOUND_PROXY?.trim() ||
-    (parseBool(env.WISP_USE_ENV_PROXY, false)
-      ? env.HTTPS_PROXY?.trim() || env.https_proxy?.trim() || env.HTTP_PROXY?.trim() || env.http_proxy?.trim() || ""
-      : "");
+  const useEnvProxy = parseBool(env.WISP_USE_ENV_PROXY, true);
+  const explicitProxy = env.WISP_OUTBOUND_PROXY?.trim() || "";
+  const outboundProxy = explicitProxy
+    ? explicitProxy.includes("://")
+      ? explicitProxy
+      : `http://${explicitProxy}`
+    : useEnvProxy
+      ? pickEnvHttpProxy(env)
+      : "";
+  const noProxy =
+    env.WISP_NO_PROXY !== undefined
+      ? parseList(env.WISP_NO_PROXY)
+      : useEnvProxy
+        ? parseList(env.NO_PROXY ?? env.no_proxy)
+        : [];
 
   return {
     isProduction,
@@ -138,6 +187,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     allowedPorts: parseAllowedPorts(env.WISP_ALLOWED_PORTS),
     allowPrivateIps: parseBool(env.WISP_ALLOW_PRIVATE, false),
     outboundProxy,
+    noProxy,
 
     maxConnectionsPerIp: parseIntEnv(env.WISP_MAX_CONNECTIONS_PER_IP, 4, 1, 1000),
     maxConnectsPerMinPerIp: parseIntEnv(env.WISP_MAX_CONNECTS_PER_MIN_PER_IP, 30, 1, 10000),

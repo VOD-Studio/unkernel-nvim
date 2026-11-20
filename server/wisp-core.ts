@@ -7,7 +7,7 @@
 import type { ServerWebSocket, WebSocketHandler } from "bun";
 import { createConnection, type Socket } from "node:net";
 import type { ServerConfig } from "./config.ts";
-import { isHostAllowed, isPortAllowed, resolveAndValidateHost } from "./security.ts";
+import { isHostAllowed, isPortAllowed, resolveAndValidateHost, shouldBypassProxy } from "./security.ts";
 
 // Wisp v1 packet types
 export const WISP_PKT_CONNECT = 1;
@@ -127,7 +127,7 @@ function connectViaHttpProxy(
       return;
     }
 
-    const proxyHost = parsed.hostname;
+    const proxyHost = parsed.hostname.replace(/^\[|\]$/g, "");
     const proxyPort = parsed.port ? Number.parseInt(parsed.port, 10) : parsed.protocol === "https:" ? 443 : 80;
     const socket = createConnection({ host: proxyHost, port: proxyPort });
     socket.setNoDelay(true);
@@ -147,7 +147,8 @@ function connectViaHttpProxy(
       fail(Object.assign(new Error("Proxy CONNECT timed out"), { code: "ETIMEDOUT" }));
     }, timeoutMs);
 
-    const authority = targetHost.includes(":") ? `[${targetHost}]:${targetPort}` : `${targetHost}:${targetPort}`;
+    const cleanTargetHost = targetHost.replace(/^\[|\]$/g, "");
+    const authority = cleanTargetHost.includes(":") ? `[${cleanTargetHost}]:${targetPort}` : `${cleanTargetHost}:${targetPort}`;
     const headers = [`CONNECT ${authority} HTTP/1.1`, `Host: ${authority}`, "Proxy-Connection: Keep-Alive"];
     if (parsed.username || parsed.password) {
       const cred = Buffer.from(
@@ -355,7 +356,7 @@ export function createWispEngine(
       return;
     }
 
-    if (config.outboundProxy) {
+    if (config.outboundProxy && !shouldBypassProxy(stream.host, stream.port, config.noProxy)) {
       // Even with an outbound HTTP proxy, still block explicit private IP literals unless allowed
       const resolved = await resolveAndValidateHost(stream.host, config.allowPrivateIps).catch(() => null);
       if (resolved && !resolved.ok && resolved.code === "blocked") {

@@ -2,7 +2,7 @@
   "name": "unkernel-nvim",
   "version": "0.1.0",
   "private": true,
-  "description": "High-performance fullscreen browser Neovim powered by unkernel (Alpine aarch64 + DefectingCat/nvim)",
+  "description": "Fullscreen browser Neovim powered by unkernel (Debian or Alpine aarch64 + DefectingCat/nvim)",
   "type": "module",
   "packageManager": "bun@1.4.4",
   "scripts": {

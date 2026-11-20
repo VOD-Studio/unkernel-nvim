@@ -3,6 +3,7 @@
 // Provides local directory mounting (9p), workspace switching, session switching,
 // font sizing, disk persistence/export/import/reset, and runtime diagnostics.
 
+import { DISTROS, isDistro } from "./distro.ts";
 import { isDirectoryPickerSupported, pickHostDirectory } from "./fs-bridge.ts";
 import {
   formatMemoryLabel,
@@ -137,6 +138,8 @@ export class ModalController {
   }
 
   render(): void {
+    this.#dialog.querySelector(".modal-subtitle")!.textContent =
+      `${DISTROS[this.#vmManager.activeDistro].label} aarch64 · DefectingCat/nvim`;
     this.#renderWorkspace();
     this.#renderStorage();
     this.#renderSystem();
@@ -205,6 +208,7 @@ export class ModalController {
     const pickerSupported = isDirectoryPickerSupported();
     const mounts = [...this.#vmManager.mountedFolders.values()];
     const { activePty, currentCwd, currentMode } = this.#vmManager;
+    const distro = DISTROS[this.#vmManager.activeDistro].label;
     panel.innerHTML = `
       <div class="modal-section">
         <h3 class="modal-section-title">本地目录与常用路径</h3>
@@ -250,8 +254,8 @@ export class ModalController {
             <span class="modal-btn-desc">工作目录 <code>${escapeHtml(currentCwd)}</code></span>
           </button>
           <button class="modal-btn" id="btn-switch-shell" type="button">
-            <span>${activePty && currentMode === "shell" ? "重启 Alpine Shell" : "打开 Alpine Shell"}</span>
-            <span class="modal-btn-desc">打开 /bin/sh 终端命令行</span>
+            <span>${activePty && currentMode === "shell" ? "重启" : "打开"} ${distro} Shell</span>
+            <span class="modal-btn-desc">打开 ${escapeHtml(this.#vmManager.shellName)} 终端命令行</span>
           </button>
         </div>
         <div class="row-bar">
@@ -278,9 +282,10 @@ export class ModalController {
 
   #renderStorage(): void {
     const panel = this.#panel("storage");
+    const distro = DISTROS[this.#vmManager.activeDistro].label;
     panel.innerHTML = `
       <div class="modal-section">
-        <h3 class="modal-section-title">持久化磁盘</h3>
+        <h3 class="modal-section-title">${distro} 持久化磁盘</h3>
         <div class="modal-grid">
           <button class="modal-btn" id="btn-sync-disk" type="button">
             <span>立即同步落盘 (Sync)</span>
@@ -292,7 +297,7 @@ export class ModalController {
           </button>
           <button class="modal-btn" id="btn-import-disk" type="button">
             <span>导入磁盘备份…</span>
-            <span class="modal-btn-desc">从 .kwsparse.gz 恢复并刷新</span>
+            <span class="modal-btn-desc">从 ${distro} 的 .kwsparse.gz 备份恢复</span>
           </button>
         </div>
         <input type="file" id="input-import-disk" accept=".gz,.kwsparse" hidden />
@@ -315,8 +320,9 @@ export class ModalController {
     const jit = diag.stats?.jit;
     const diskMiB = ((diag.diskBlocks * 4096) / 1048576).toFixed(1);
     const { cpuCount, cpuLimit, cpuBlocker } = this.#vmManager;
+    const { activeDistro, distro } = this.#vmManager;
     const cpuLabel = diag.cpus === null ? "—" : `${diag.cpus} 核`;
-    let cpuHint = "多核为实验功能，暂不支持内存快照";
+    let cpuHint = `此设备最多 ${cpuLimit} 核 · 内存快照支持单核模式`;
     if (cpuBlocker) {
       cpuHint = diag.crossOriginIsolated ? "当前浏览器环境仅支持单核" : "多核需要跨源隔离";
     } else if (cpuLimit === 1) {
@@ -373,6 +379,19 @@ export class ModalController {
       </div>
       <div class="modal-section">
         <h3 class="modal-section-title">虚拟机配置</h3>
+        <div class="row-bar">
+          <div class="row-label-group">
+            <label class="row-label" for="select-distro">Linux 发行版</label>
+            <span class="row-hint" id="distro-hint">当前 ${DISTROS[activeDistro].label} · 两个发行版各自保存磁盘</span>
+          </div>
+          <div class="row-controls">
+            <select class="text-input" id="select-distro" aria-describedby="distro-hint">
+              ${Object.entries(DISTROS).map(([value, { label }]) =>
+                `<option value="${value}" ${value === distro ? "selected" : ""}>${label}</option>`
+              ).join("")}
+            </select>
+          </div>
+        </div>
         <div class="row-bar">
           <div class="row-label-group">
             <label class="row-label" for="select-vcpus">虚拟 CPU 核数</label>
@@ -592,6 +611,13 @@ export class ModalController {
   #bindSystemEvents(panel: HTMLElement): void {
     const q = <T extends HTMLElement>(sel: string) => panel.querySelector<T>(sel);
 
+    const distroSelect = q<HTMLSelectElement>("#select-distro")!;
+    distroSelect.addEventListener("change", () => {
+      if (!isDistro(distroSelect.value)) return;
+      this.#vmManager.setDistro(distroSelect.value);
+      this.#renderRestart();
+    });
+
     const cpuSelect = q<HTMLSelectElement>("#select-vcpus")!;
     cpuSelect.addEventListener("change", () => {
       this.#vmManager.setCpuCount(Number(cpuSelect.value));
@@ -695,6 +721,7 @@ export class ModalController {
       return;
     }
     const settings = [
+      this.#vmManager.hasPendingDistroChange() ? "发行版" : null,
       this.#vmManager.hasPendingCpuChange() ? "CPU 核数" : null,
       this.#vmManager.hasPendingMemoryChange() ? "内存配额" : null,
       this.#vmManager.hasPendingNetworkChange() ? "Wisp 网络" : null,

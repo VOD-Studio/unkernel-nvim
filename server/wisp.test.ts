@@ -4,10 +4,11 @@
 
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { createServer, type Server as TcpServer } from "node:net";
+import { createConnection, createServer, type Server as TcpServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { HttpBase, wispBackend } from "unkernel/node";
+import { formatProxyForLog, loadConfig } from "./config.ts";
 import { startAppServer } from "./index.ts";
 import {
   buildSessionSetCookieHeader,
@@ -19,6 +20,7 @@ import {
   isPortAllowed,
   isPrivateOrReservedIp,
   SESSION_COOKIE_NAME,
+  shouldBypassProxy,
   verifyBearerToken,
   verifySessionToken,
 } from "./security.ts";
@@ -162,6 +164,59 @@ describe("security primitives", () => {
     const t5 = limiter.acquire("1.2.3.4");
     expect(t5.ok).toBe(false); // per-minute cap = 3 reached
   });
+
+  test("loadConfig reads environment proxy and NO_PROXY by default", () => {
+    const fromHttps = loadConfig({
+      https_proxy: "http://127.0.0.1:7890",
+      http_proxy: "http://127.0.0.1:7891",
+      no_proxy: "127.0.0.1,localhost,.internal.local",
+    });
+    expect(fromHttps.outboundProxy).toBe("http://127.0.0.1:7890");
+    expect(fromHttps.noProxy).toEqual(["127.0.0.1", "localhost", ".internal.local"]);
+
+    // Skips unsupported socks5:// and falls back to http:// ALL_PROXY or bare host:port
+    const skipSocks = loadConfig({
+      HTTPS_PROXY: "socks5://127.0.0.1:1080",
+      ALL_PROXY: "127.0.0.1:7890",
+    });
+    expect(skipSocks.outboundProxy).toBe("http://127.0.0.1:7890");
+
+    // Explicit WISP_OUTBOUND_PROXY overrides env proxy; WISP_NO_PROXY overrides NO_PROXY
+    const explicit = loadConfig({
+      WISP_OUTBOUND_PROXY: "http://user:secret@127.0.0.1:8888",
+      HTTPS_PROXY: "http://127.0.0.1:7890",
+      WISP_NO_PROXY: "example.com",
+      NO_PROXY: "localhost",
+    });
+    expect(explicit.outboundProxy).toBe("http://user:secret@127.0.0.1:8888");
+    expect(explicit.noProxy).toEqual(["example.com"]);
+    expect(formatProxyForLog(explicit.outboundProxy)).toBe("http://127.0.0.1:8888");
+
+    // Can explicitly opt out via WISP_USE_ENV_PROXY=false
+    const disabled = loadConfig({
+      WISP_USE_ENV_PROXY: "false",
+      HTTPS_PROXY: "http://127.0.0.1:7890",
+      NO_PROXY: "localhost",
+    });
+    expect(disabled.outboundProxy).toBe("");
+    expect(disabled.noProxy).toEqual([]);
+  });
+
+  test("shouldBypassProxy matches standard NO_PROXY rules", () => {
+    const rules = ["127.0.0.1", "localhost", "::1", "[::1]:8443", ".internal.local", "corp.example", "api.test:8080"];
+    expect(shouldBypassProxy("127.0.0.1", 443, rules)).toBe(true);
+    expect(shouldBypassProxy("LOCALHOST.", 3000, rules)).toBe(true);
+    expect(shouldBypassProxy("::1", 443, rules)).toBe(true);
+    expect(shouldBypassProxy("svc.internal.local", 443, rules)).toBe(true);
+    expect(shouldBypassProxy("internal.local", 443, rules)).toBe(true);
+    expect(shouldBypassProxy("sub.corp.example", 443, rules)).toBe(true);
+    expect(shouldBypassProxy("evilcorp.example", 443, rules)).toBe(false);
+    expect(shouldBypassProxy("api.test", 8080, rules)).toBe(true);
+    expect(shouldBypassProxy("api.test", 443, rules)).toBe(false);
+    expect(shouldBypassProxy("github.com", 443, rules)).toBe(false);
+    expect(shouldBypassProxy("github.com", 443, ["*"])).toBe(true);
+    expect(shouldBypassProxy("127.0.0.1", 443, ["1"])).toBe(false);
+  });
 });
 
 describe("gateway <-> authenticated Wisp end-to-end", () => {
@@ -214,6 +269,7 @@ describe("gateway <-> authenticated Wisp end-to-end", () => {
       allowedHosts: ["*"],
       allowedPorts: [echoPort],
       allowPrivateIps: true,
+      outboundProxy: "",
     });
     cleanups.push(() => wisp.stop());
 
@@ -482,5 +538,108 @@ describe("gateway <-> authenticated Wisp end-to-end", () => {
     expect(httpBase.size).toBe(payload.length);
     const slice = await httpBase.read(20000, 128);
     expect(slice).toEqual(payload.subarray(20000, 20128));
+  });
+
+  test("Wisp tunnels outbound TCP through HTTP CONNECT proxy and honors NO_PROXY bypass", async () => {
+    const { port: echoPort } = await startEchoTcpServer();
+    const connectTargets: string[] = [];
+
+    const proxyPort = await new Promise<number>((resolve) => {
+      const proxy = createServer((client) => {
+        let head = Buffer.alloc(0);
+        const onData = (chunk: Buffer) => {
+          head = Buffer.concat([head, chunk]);
+          const sep = head.indexOf("\r\n\r\n");
+          if (sep === -1) return;
+          client.off("data", onData);
+          const firstLine = head.subarray(0, sep).toString("ascii").split("\r\n")[0] ?? "";
+          const m = /^CONNECT\s+([^:\s]+):(\d+)\s+HTTP\/1\.[01]$/i.exec(firstLine);
+          if (!m?.[1] || !m[2]) {
+            client.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+            return;
+          }
+          const targetHost = m[1];
+          const targetPort = Number.parseInt(m[2], 10);
+          connectTargets.push(`${targetHost}:${targetPort}`);
+          const upstream = createConnection({ host: targetHost, port: targetPort }, () => {
+            client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+            const leftover = head.subarray(sep + 4);
+            if (leftover.length > 0) upstream.write(leftover);
+            client.pipe(upstream);
+            upstream.pipe(client);
+          });
+          upstream.on("error", () => {
+            client.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+          });
+          client.on("error", () => upstream.destroy());
+        };
+        client.on("data", onData);
+      });
+      proxy.listen(0, "127.0.0.1", () => {
+        const addr = proxy.address();
+        cleanups.push(() => proxy.close());
+        resolve(typeof addr === "object" && addr ? addr.port : 0);
+      });
+    });
+
+    const roundTrip = (backend: ReturnType<typeof wispBackend>, host: string, port: number, msg: string) =>
+      new Promise<string>((resolve, reject) => {
+        const chunks: Uint8Array[] = [];
+        const conn = backend.connect(
+          { host, port },
+          {
+            onConnect() {
+              conn.write(new TextEncoder().encode(msg));
+            },
+            onData(u8) {
+              chunks.push(u8.slice());
+            },
+            onEnd() {},
+            onDrain() {},
+            onClose(err) {
+              if (err) {
+                reject(err);
+                return;
+              }
+              const total = chunks.reduce((n, c) => n + c.byteLength, 0);
+              const merged = new Uint8Array(total);
+              let off = 0;
+              for (const c of chunks) {
+                merged.set(c, off);
+                off += c.byteLength;
+              }
+              resolve(new TextDecoder().decode(merged));
+            },
+          },
+        );
+      });
+
+    // 1. Proxied connection (noProxy does not include 127.0.0.1)
+    const appProxied = startAppServer({
+      config: {
+        host: "127.0.0.1",
+        port: 0,
+        wispPath: "/wisp",
+        wispUpstreamUrl: "",
+        requireSession: false,
+        allowedHosts: ["*"],
+        allowedPorts: [echoPort],
+        allowPrivateIps: true,
+        outboundProxy: `http://127.0.0.1:${proxyPort}`,
+        noProxy: ["localhost"],
+      },
+    });
+    cleanups.push(() => appProxied.stop());
+
+    const backendProxied = wispBackend(`ws://127.0.0.1:${appProxied.port}/wisp`, {
+      headers: { Origin: `http://127.0.0.1:${appProxied.port}` },
+    });
+    expect(await roundTrip(backendProxied, "127.0.0.1", echoPort, "via-proxy")).toBe("ECHO:via-proxy");
+    expect(connectTargets).toEqual([`127.0.0.1:${echoPort}`]);
+
+    // 2. Bypassed connection via noProxy ("localhost" matches noProxy -> direct TCP, not via CONNECT proxy)
+    expect(await roundTrip(backendProxied, "localhost", echoPort, "bypass-proxy")).toBe("ECHO:bypass-proxy");
+    expect(connectTargets).toEqual([`127.0.0.1:${echoPort}`]);
+    backendProxied.close();
   });
 });

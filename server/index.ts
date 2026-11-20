@@ -10,7 +10,7 @@ import type { ServerWebSocket } from "bun";
 import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig, type ServerConfig } from "./config.ts";
+import { formatProxyForLog, loadConfig, type ServerConfig } from "./config.ts";
 import {
   buildSessionSetCookieHeader,
   getClientIp,
@@ -259,10 +259,11 @@ export function startAppServer(opts: { config?: Partial<ServerConfig>; distDir?:
     },
   });
 
+  const proxySummary = config.outboundProxy ? `, proxy=${formatProxyForLog(config.outboundProxy)}` : "";
   const wispSummary =
     mode === "gateway"
       ? `gateway -> ${config.wispUpstreamUrl} (auth=${config.wispAuthToken ? "bearer-token" : "none"})`
-      : `builtin (hosts=${config.allowedHosts.includes("*") ? "*" : config.allowedHosts.length}, ports=${config.allowedPorts === "*" ? "*" : config.allowedPorts.join(",")}, privateIps=${config.allowPrivateIps})`;
+      : `builtin (hosts=${config.allowedHosts.includes("*") ? "*" : config.allowedHosts.length}, ports=${config.allowedPorts === "*" ? "*" : config.allowedPorts.join(",")}, privateIps=${config.allowPrivateIps}${proxySummary})`;
 
   console.log(
     `[server] unkernel-nvim listening on http://${server.hostname}:${server.port} ` +
