@@ -1,0 +1,167 @@
+name: Docker release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish to GHCR
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+
+      - name: Validate the release tag
+        shell: bash
+        run: |
+          version=$(bun -p 'require("./package.json").version')
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ || "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "Expected a vMAJOR.MINOR.PATCH tag matching package.json ($version), got $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "The release commit must be on main" >&2
+            exit 1
+          fi
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          {
+            printf 'VERSION=%s\n' "$version"
+            printf 'IMAGE=%s\n' "$image"
+            printf 'RELEASE_IMAGE=%s:%s\n' "$image" "$version"
+            printf 'REVISION=%s\n' "$(git rev-parse HEAD)"
+          } >> "$GITHUB_ENV"
+
+      - name: Find an existing image for this version
+        id: registry
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_TYPE: ${{ github.event.repository.owner.type }}
+        run: |
+          owner=${GITHUB_REPOSITORY_OWNER,,}
+          package=${GITHUB_REPOSITORY#*/}
+          scope="users/$owner"
+          if [[ "$OWNER_TYPE" == Organization ]]; then
+            scope="orgs/$owner"
+          fi
+          error=$(mktemp)
+          if versions=$(gh api --paginate "$scope/packages/container/${package,,}/versions?per_page=100" 2>"$error"); then
+            digest=$(jq -r --arg version "$VERSION" '.[] | select(.metadata.container.tags | index($version)) | .name' <<< "$versions")
+          else
+            # GHCR has no package to list before the first push.
+            if [[ $(<"$error") != *'(HTTP 404)'* ]]; then
+              cat "$error" >&2
+              exit 1
+            fi
+            digest=
+          fi
+          if [[ -n "$digest" && ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Unexpected manifest digest for $RELEASE_IMAGE: $digest" >&2
+            exit 1
+          fi
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Restore a published image for a retry
+        if: steps.registry.outputs.digest != ''
+        shell: bash
+        env:
+          DIGEST: ${{ steps.registry.outputs.digest }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker pull "$IMAGE@$DIGEST"
+          revision=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE@$DIGEST")
+          if [[ "$revision" != "$REVISION" ]]; then
+            echo "$RELEASE_IMAGE already points to an image built from $revision" >&2
+            exit 1
+          fi
+          docker tag "$IMAGE@$DIGEST" "$RELEASE_IMAGE"
+
+      - name: Install Zig 0.17.0
+        if: steps.registry.outputs.digest == ''
+        shell: bash
+        run: |
+          zig_dir="$RUNNER_TEMP/zig-0.17.0"
+          mkdir -p "$zig_dir"
+          curl -fsSL --retry 3 https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz \
+            -o "$zig_dir/zig.tar.xz"
+          printf '%s  %s\n' 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026 \
+            "$zig_dir/zig.tar.xz" | sha256sum --check
+          tar -xJf "$zig_dir/zig.tar.xz" --strip-components=1 -C "$zig_dir"
+          printf '%s\n' "$zig_dir" >> "$GITHUB_PATH"
+
+      - name: Test and prebake both guest environments
+        if: steps.registry.outputs.digest == ''
+        run: |
+          bun install --frozen-lockfile
+          bun test
+          bun run prebake
+
+      - name: Build the release image
+        if: steps.registry.outputs.digest == ''
+        run: |
+          docker build --platform linux/amd64 --tag "$RELEASE_IMAGE" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.version=$VERSION" \
+            --label "org.opencontainers.image.revision=$REVISION" .
+
+      - name: Smoke-test Compose and guest assets
+        shell: bash
+        env:
+          APP_BIND: 127.0.0.1:0
+        run: |
+          WISP_AUTH_TOKEN=$(openssl rand -hex 32)
+          export WISP_AUTH_TOKEN
+          export UNKERNEL_NVIM_IMAGE="$RELEASE_IMAGE"
+          trap 'docker compose down' EXIT
+          if ! docker compose up -d --no-build --pull never --wait --wait-timeout 90; then
+            docker compose logs --no-color
+            exit 1
+          fi
+          address=$(docker compose port app 3000)
+          bun scripts/smoke-docker.ts "http://$address"
+
+      - name: Push the tested image and record its digest
+        id: publish
+        shell: bash
+        env:
+          EXISTING_DIGEST: ${{ steps.registry.outputs.digest }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          digest="$EXISTING_DIGEST"
+          if [[ -z "$digest" ]]; then
+            printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+            docker push "$RELEASE_IMAGE"
+            digest=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$RELEASE_IMAGE")
+          fi
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Create the GitHub Release
+        shell: bash
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            exit 0
+          fi
+          notes=$(printf 'Docker image `docker pull %s`\n\nPinned image `%s@%s`\n' "$RELEASE_IMAGE" "$IMAGE" "$DIGEST")
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes --notes "$notes"

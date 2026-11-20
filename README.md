@@ -90,6 +90,13 @@ bun run prebake
 docker compose up -d --build
 ```
 
+也可以从 GHCR 拉取已发布的镜像。将 `.env` 中的 `UNKERNEL_NVIM_IMAGE` 设为发布说明中提供的完整版本或摘要，例如 `ghcr.io/vod-studio/unkernel-nvim:0.1.0`。两个服务都使用这个镜像，部署机只需 Docker Compose。 [GitHub Releases](https://github.com/VOD-Studio/unkernel-nvim/releases)
+
+```bash
+docker compose pull
+docker compose up -d --no-build --pull never
+```
+
 ### 部署方式 B：单进程一体化部署（简单轻量）
 
 如果不拆分独立 Wisp 进程，留空 `WISP_UPSTREAM_URL` 即可在同一 Bun 进程内运行静态站点与 Wisp 引擎：
@@ -101,10 +108,25 @@ bun run build
 NODE_ENV=production TRUST_PROXY=true PORT=3000 bun run start
 ```
 
+### 版本与发布
+
+`package.json` 保存项目版本号。`0.x` 阶段的兼容性修复升补丁版本，新增功能或破坏性变更升次版本。涉及环境变量、Compose 配置或磁盘备份格式的变更，应在发布说明中附上迁移步骤。
+
+PR 和 `main` 上的提交会运行 `Test and build` 检查。首次运行后，在仓库规则中将它设为 `main` 的必需状态检查，并限制 `v*` 标签的更新和删除。发布时先确认目标提交已在 `main` 上通过 CI，再推送与 `package.json` 一致的版本标签。首次发布使用 `v0.1.0`。
+
+```bash
+git fetch origin main
+git tag -a v0.1.0 origin/main -m "Release v0.1.0"
+git push origin refs/tags/v0.1.0
+```
+
+发布工作流会预烘焙 Debian 和 Alpine，构建 `linux/amd64` 镜像，用 Compose 验证两个服务和四个虚拟机资源，再推送镜像并创建 GitHub Release。Release 会记录镜像摘要以便部署和回滚。首次推送后，将 GHCR 包设为公开即可匿名拉取。同一版本的工作流可重跑，已推送的镜像会按摘要复用。需要修复已发布版本时，发布新版本。
+
 ### 关键环境变量（完整列表见 `.env.example`）
 
 | 环境变量 | 默认值 | 说明 |
 | :--- | :--- | :--- |
+| `UNKERNEL_NVIM_IMAGE` | *(空)* | Compose 使用的发布镜像，支持完整版本标签和摘要 |
 | `NODE_ENV` | `development` | 设为 `production` 时默认启用 Neovim 和发行版软件源的公网域名白名单 |
 | `PORT` / `WISP_PORT` | `3000` / `6680` | 应用服务器端口 / 独立 Wisp 服务端口 |
 | `TRUST_PROXY` | `false` | 位于 Nginx / Caddy / Cloudflare 后时设为 `true` |
