@@ -40,8 +40,32 @@ const MIME_TYPES: Record<string, string> = {
   ".png": "image/png",
   ".ico": "image/x-icon",
   ".gz": "application/gzip",
+  ".erofs": "application/octet-stream",
   ".kwsparse": "application/octet-stream",
 };
+
+function parseByteRange(header: string, size: number): { start: number; end: number } | "invalid" | null {
+  const m = /^bytes=(.+)$/i.exec(header.trim());
+  if (!m) return null;
+  const spec = m[1]!.trim();
+  if (spec.includes(",")) return null;
+  const parts = /^(\d*)-(\d*)$/.exec(spec);
+  if (!parts) return null;
+  const [, startStr, endStr] = parts;
+  if (!startStr && !endStr) return null;
+  if (size <= 0) return "invalid";
+  if (!startStr) {
+    const suffix = Number(endStr);
+    if (!Number.isSafeInteger(suffix) || suffix <= 0) return "invalid";
+    return { start: Math.max(0, size - suffix), end: size - 1 };
+  }
+  const start = Number(startStr);
+  const end = endStr ? Math.min(Number(endStr), size - 1) : size - 1;
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start >= size || start > end) {
+    return "invalid";
+  }
+  return { start, end };
+}
 
 function baseSecurityHeaders(): Record<string, string> {
   return {
@@ -156,6 +180,7 @@ export function startAppServer(opts: { config?: Partial<ServerConfig>; distDir?:
 
       const headers = new Headers(baseSecurityHeaders());
       headers.set("Content-Type", contentType);
+      headers.set("Accept-Ranges", "bytes");
       headers.set("Content-Length", String(st.size));
       headers.set("ETag", etag);
 
@@ -179,6 +204,21 @@ export function startAppServer(opts: { config?: Partial<ServerConfig>; distDir?:
 
       if (req.method === "HEAD") {
         return new Response(null, { status: 200, headers });
+      }
+
+      const rangeHeader = req.headers.get("range");
+      if (rangeHeader) {
+        const range = parseByteRange(rangeHeader, st.size);
+        if (range === "invalid") {
+          headers.set("Content-Range", `bytes */${st.size}`);
+          headers.delete("Content-Length");
+          return new Response(null, { status: 416, headers });
+        }
+        if (range) {
+          headers.set("Content-Range", `bytes ${range.start}-${range.end}/${st.size}`);
+          headers.set("Content-Length", String(range.end - range.start + 1));
+          return new Response(Bun.file(filePath).slice(range.start, range.end + 1), { status: 206, headers });
+        }
       }
 
       return new Response(Bun.file(filePath), { status: 200, headers });

@@ -1,13 +1,13 @@
 # unkernel-nvim
 
-基于 [@vod-studio/unkernel](https://github.com/VOD-Studio/unkernel)（WebAssembly Linux 7.x 内核 + Alpine `riscv64` JIT）、[DefectingCat/nvim](https://github.com/DefectingCat/nvim) 与 **Bun 1.4** 原生后端构建的全屏浏览器端 Neovim 工作区。在浏览器本地运行完整的 Linux 用户态、原生 Neovim 0.12、LSP 与 Tree-sitter 工具链，并内置零外部依赖的自建 Wisp 联网后端与公网免登录安全防护。
+基于 [unkernel](https://github.com/pithings/unkernel)（WebAssembly Linux 7.x 内核 + Alpine `aarch64` JIT）、[DefectingCat/nvim](https://github.com/DefectingCat/nvim) 与 **Bun 1.4** 原生后端构建的全屏浏览器端 Neovim 工作区。在浏览器本地运行完整的 Linux 用户态、原生 Neovim 0.12、LSP 与 Tree-sitter 工具链，并内置零外部依赖的自建 Wisp 联网后端与公网免登录安全防护。
 
 ---
 
 ## 核心特性
 
-- **真实 Linux 内核与原生用户态**：基于 `unkernel` 在 Web Worker 中运行编译为 WebAssembly 的 Linux 内核，直接执行未经修改的 Alpine Linux 3.24 `riscv64` 二进制程序（`neovim`、`git`、`ripgrep`、`fd`、`lua-language-server`、`stylua`）。
-- **开箱即用的预烘焙环境**：内置 [DefectingCat/nvim](https://github.com/DefectingCat/nvim) 配置、13 款核心插件（`clay.nvim`、`mini.nvim`、`nvim-treesitter`、`neogit`、`codediff.nvim`、`conform.nvim`、`gitsigns.nvim`、`grug-far.nvim` 等）以及 24 个 `riscv64` 原生编译的 Tree-sitter 解析器，构建期已完成 `vim.loader` 字节码预热。
+- **真实 Linux 内核与原生用户态**：基于 `unkernel` 在 Web Worker 中运行编译为 WebAssembly 的 Linux 内核，直接执行未经修改的 Alpine Linux 3.24 `aarch64` 二进制程序（`neovim`、`git`、`ripgrep`、`fd`、`lua-language-server`、`stylua`）。
+- **开箱即用的预烘焙环境**：内置 [DefectingCat/nvim](https://github.com/DefectingCat/nvim) 配置、13 款核心插件（`clay.nvim`、`mini.nvim`、`nvim-treesitter`、`neogit`、`codediff.nvim`、`conform.nvim`、`gitsigns.nvim`、`grug-far.nvim` 等）以及 24 个 `aarch64` 原生编译的 Tree-sitter 解析器，构建期已完成 `vim.loader` 字节码预热。
 - **二次启动零下载与 IndexedDB 持久化**：首次访问流式加载约 45 MiB 的压缩稀疏镜像（`nvim-data.kwsparse.gz`）；后续访问自动探测本地 IndexedDB Overlay 磁盘并跳过镜像下载（**0 B 网络传输**）。支持一键落盘同步、`.kwsparse.gz` 磁盘快照导入/导出与出厂重置。
 - **自建 Bun Wisp 后端与公网纵深防御**：基于 Bun 原生 `Bun.serve({ websocket })` 提供同源 `/wisp` 代理，无需前端登录即可在虚拟机内使用 `curl`、`git`、`apk` 和 `:PackUpdate`。同时支持**单进程内置模式**与**网关 + 独立认证 Wisp 分离模式**（仅服务端持有的 `WISP_AUTH_TOKEN` 环境变量认证）。
 - **本地目录直通挂载（9p over vsock）**：将浏览器 File System Access API（`showDirectoryPicker`）桥接为 `unkernel` 9p 文件系统，支持将宿主机本地项目目录直接挂载至 `/workspace/<name>` 进行实时读写。
@@ -31,7 +31,7 @@ bun run dev
 
 ### 虚拟机多核
 
-打开控制中心的 **虚拟机与诊断**，选择 **虚拟 CPU 核数**，再点击 **同步并重启**。设置保存在当前浏览器，诊断面板会显示实际在线的核数。默认使用 1 核，可选上限为浏览器报告的逻辑处理器数量，最多 8 核。
+打开控制中心的 **虚拟机与诊断**，选择 **虚拟 CPU 核数**，再点击 **同步并重启**。设置保存在当前浏览器，诊断面板会显示实际在线的核数。默认使用 1 核，可选上限为浏览器报告的逻辑处理器数量，最多 16 核。
 
 多核（SMP）为实验功能，需要跨源隔离和 `Atomics.waitAsync`。项目已设置 COOP / COEP 响应头，请通过 HTTPS 或 `localhost` 访问。多核模式暂不支持内存快照，文件可通过存储面板同步至 IndexedDB 或导出磁盘备份。
 
@@ -45,9 +45,9 @@ bun run dev
 | `bun run start` | 启动 Bun 生产一体化服务器（托管 `dist/` + `/wisp` 内置引擎或认证网关） |
 | `bun run wisp` | 启动独立认证 Wisp 服务（默认强制校验 `WISP_AUTH_TOKEN`） |
 | `bun test` | 运行安全原语、网关认证、SSRF 防护与 Wisp 端到端测试 |
-| `bun run prebake` | 重新构建 Alpine `riscv64` + Neovim 预烘焙磁盘镜像 |
+| `bun run prebake` | 重新构建 Alpine `aarch64` + Neovim 预烘焙磁盘镜像（同时生成 `public/alpine.erofs`） |
 
-> **提示**：执行 `bun run prebake` 需要宿主机安装 **Bun >= 1.4**（内置 WebAssembly JSPI 支持）、`git`、`curl` 以及 **Zig**（用于通过 `zig cc` 将 `codediff.nvim` 的 `libvscode_diff.so` 与额外 Tree-sitter 解析器交叉编译至 `riscv64-linux-musl`）。
+> **提示**：执行 `bun run prebake` 需要宿主机安装 **Bun >= 1.4**（内置 WebAssembly JSPI 支持）、`git`、`curl` 以及 **Zig**（用于通过 `zig cc` 将 `codediff.nvim` 的 `libvscode_diff.so` 与额外 Tree-sitter 解析器交叉编译至 `aarch64-linux-musl`）。
 
 ---
 
@@ -178,7 +178,8 @@ unkernel-nvim/
 ├── docker-compose.yml       # 公网推荐双服务编排（应用网关 + 内部网络认证 Wisp）
 ├── public/
 │   ├── fonts/               # 预加载的 Symbols Nerd Font Mono 图标字体
-│   └── nvim-data.kwsparse.gz # 预烘焙的 Alpine riscv64 + Neovim 稀疏磁盘镜像
+│   ├── alpine.erofs         # Alpine aarch64 只读根发行版镜像 (由 prebake 生成)
+│   └── nvim-data.kwsparse.gz # 预烘焙的 Alpine aarch64 + Neovim 稀疏磁盘镜像
 ├── server/
 │   ├── config.ts            # 环境变量解析与安全默认策略
 │   ├── security.ts          # Bearer Token 校验、无感 HMAC Cookie、Origin、反 SSRF、限流

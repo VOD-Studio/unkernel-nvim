@@ -105,8 +105,8 @@ modal = new ModalController({
 async function bootApp(): Promise<void> {
   try {
     bootBadgeEl.textContent = globalThis.crossOriginIsolated
-      ? "riscv64 · SharedArrayBuffer"
-      : "riscv64 · Worker";
+      ? "aarch64 · SharedArrayBuffer"
+      : "aarch64 · Worker";
 
     const size = terminal.getSize();
     await vmManager.boot(size.cols, size.rows);

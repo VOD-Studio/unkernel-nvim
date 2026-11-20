@@ -187,7 +187,7 @@ export default defineConfig({
     format: "es",
   },
   optimizeDeps: {
-    exclude: ["@vod-studio/unkernel"],
+    exclude: ["unkernel"],
   },
   build: {
     target: "esnext",

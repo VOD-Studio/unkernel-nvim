@@ -3,15 +3,16 @@
 // Runs on Bun >= 1.4 (native WebAssembly JSPI):
 // 1. Clones DefectingCat/nvim + all 13 vim.pack plugins on the host in parallel;
 // 2. Cross-compiles codediff.nvim's libvscode_diff.so and the 9 non-apk Treesitter
-//    parsers to riscv64-linux-musl using host `zig cc`;
-// 3. Boots unkernel with the bundled 4 GiB kwdata disk, installs Alpine riscv64
+//    parsers to aarch64-linux-musl using host `zig cc`;
+// 3. Fetches the matching Alpine aarch64 distro image (`alpine.erofs`) into `public/alpine.erofs`,
+//    boots unkernel with the bundled 4 GiB kwdata disk, installs Alpine aarch64
 //    neovim + git + ripgrep + lua-language-server + stylua + prebuilt tree-sitter-*
 //    packages, copies the prebuilt artifacts in, runs `nvim --headless` to generate
 //    `nvim-pack-lock.json` and `vim.loader` bytecode cache, and powers off cleanly;
 // 4. Exports the resulting disk as `public/nvim-data.kwsparse.gz`.
 
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,14 +23,16 @@ import {
   CowDisk,
   createKernel,
   directBackend,
+  fetchDistro,
   gzipBlob,
   nodeFs,
   readKwsparse,
   SparseBase,
-} from "@vod-studio/unkernel/node";
+} from "unkernel/node";
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const DISTRO_OUT_FILE = path.join(ROOT, "public", "alpine.erofs");
 const OUT_FILE = path.join(ROOT, "public", "nvim-data.kwsparse.gz");
 
 interface PluginSpec {
@@ -99,11 +102,11 @@ async function prepareHostAssets(stageDir: string): Promise<void> {
     }),
   ]);
 
-  // Cross-compile codediff.nvim's libvscode_diff.so for riscv64-linux-musl using zig cc
+  // Cross-compile codediff.nvim's libvscode_diff.so for aarch64-linux-musl using zig cc
   const codediffDir = path.join(packDir, "codediff.nvim");
   const vsdiffDir = path.join(codediffDir, "libvscode-diff");
   if (existsSync(vsdiffDir)) {
-    log("host", "Cross-compiling codediff.nvim libvscode_diff.so (riscv64-linux-musl)...");
+    log("host", "Cross-compiling codediff.nvim libvscode_diff.so (aarch64-linux-musl)...");
     const verFile = path.join(codediffDir, "VERSION");
     const version = existsSync(verFile) ? readFileSync(verFile, "utf8").trim() : "0.1.0";
     const verHeaderIn = readFileSync(path.join(vsdiffDir, "include", "version.h.in"), "utf8");
@@ -133,7 +136,7 @@ async function prepareHostAssets(stageDir: string): Promise<void> {
       [
         "cc",
         "-target",
-        "riscv64-linux-musl",
+        "aarch64-linux-musl",
         "-std=c11",
         "-O2",
         "-DNDEBUG",
@@ -175,7 +178,7 @@ async function prepareHostAssets(stageDir: string): Promise<void> {
       await execFileAsync("zig", [
         "cc",
         "-target",
-        "riscv64-linux-musl",
+        "aarch64-linux-musl",
         "-O2",
         "-shared",
         "-fPIC",
@@ -197,7 +200,12 @@ async function main(): Promise<void> {
   try {
     await prepareHostAssets(stageDir);
 
-    log("vm", "Loading bundled unkernel-alpine.wasm and kwdata template...");
+    log("vm", "Fetching Alpine aarch64 distro image and loading bundled unkernel.wasm...");
+    const distroPath = await fetchDistro("alpine");
+    mkdirSync(path.dirname(DISTRO_OUT_FILE), { recursive: true });
+    copyFileSync(distroPath, DISTRO_OUT_FILE);
+    log("vm", `Copied distro image to ${DISTRO_OUT_FILE}`);
+
     const wasmBytes = readFileSync(fileURLToPath(bundledKernelUrl));
     const module = await WebAssembly.compile(wasmBytes);
     const bootInfo = bundledBoot(module);
@@ -208,9 +216,10 @@ async function main(): Promise<void> {
     const base = SparseBase.fromKwsparse(await readKwsparse(bootInfo.datadisk));
     const disk = new CowDisk(base);
 
-    log("vm", "Booting Alpine riscv64 VM...");
+    log("vm", "Booting Alpine aarch64 VM...");
     const vm = await createKernel({
       kernel: module,
+      distro: distroPath,
       memoryMiB: 1024,
       jit: true,
       net: directBackend(),
@@ -223,7 +232,7 @@ async function main(): Promise<void> {
 
     const runSh = async (label: string, script: string): Promise<string> => {
       log("guest", `Running step: ${label}...`);
-      const res = await vm.exec("/bin/sh", ["-e", "-c", script]);
+      const res = await vm.exec("/bin/sh", ["-e", "-c", script], { user: "root" });
       if (res.stdout.trim()) {
         for (const line of res.stdout.trim().split("\n")) {
           log(label, line);
@@ -298,7 +307,7 @@ async function main(): Promise<void> {
       mkdir -p /root/.config/nvim/plugin
       cat > /root/.config/nvim/plugin/zz-unkernel-host.lua << 'EOF'
 -- Auto-generated unkernel browser integration bridge.
--- Enables OSC 52 clipboard and system-installed riscv64 LSP servers (e.g. lua_ls)
+-- Enables OSC 52 clipboard and system-installed aarch64 LSP servers (e.g. lua_ls)
 -- without modifying tracked files in DefectingCat/nvim.
 vim.g.clipboard = "osc52"
 
@@ -325,7 +334,7 @@ EOF
 /nvim-pack-lock.json
 EOF
 
-      # Install PUC-Rio Lua 5.1 compatibility shim for vim.loader, debug.traceback & coxpcall on riscv64
+      # Keep PUC-Rio Lua 5.1 compatibility shim as a safe no-op when LuaJIT is active
       mkdir -p /etc/xdg/nvim /usr/share/nvim
       cat > /usr/share/nvim/sysinit.vim << 'EOF'
 lua << EOLUA
@@ -404,7 +413,7 @@ EOF
       `
       mkdir -p /workspace
       cat > /workspace/welcome.lua << 'EOF'
--- Welcome to unkernel-nvim (Alpine Linux riscv64 + Neovim 0.12 + DefectingCat/nvim)
+-- Welcome to unkernel-nvim (Alpine Linux aarch64 + Neovim 0.12 + DefectingCat/nvim)
 -- Press <Space>ff to find files, - to open mini.files, or Ctrl+Shift+P for the host menu.
 
 local function greet(name)

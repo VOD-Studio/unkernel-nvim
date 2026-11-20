@@ -3,8 +3,11 @@
 // server-side Bearer auth gateway, frictionless HttpOnly session cookies, and SSRF guards.
 
 import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server as TcpServer } from "node:net";
-import { wispBackend } from "@vod-studio/unkernel/node";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { HttpBase, wispBackend } from "unkernel/node";
 import { startAppServer } from "./index.ts";
 import {
   buildSessionSetCookieHeader,
@@ -437,5 +440,47 @@ describe("gateway <-> authenticated Wisp end-to-end", () => {
       ws.onclose = (ev) => resolve(ev.code);
     });
     expect(closeCode).not.toBe(1000);
+  });
+
+  test("static asset server supports HTTP Range requests for unkernel HttpBase distro images", async () => {
+    const tmpDist = mkdtempSync(path.join(tmpdir(), "unkernel-nvim-range-"));
+    cleanups.push(() => rmSync(tmpDist, { recursive: true, force: true }));
+    writeFileSync(path.join(tmpDist, "index.html"), "<!doctype html><html></html>");
+    const payload = new Uint8Array(65536);
+    for (let i = 0; i < payload.length; i++) payload[i] = i & 0xff;
+    writeFileSync(path.join(tmpDist, "alpine.erofs"), payload);
+
+    const app = startAppServer({
+      distDir: tmpDist,
+      config: {
+        host: "127.0.0.1",
+        port: 0,
+        wispPath: "/wisp",
+        wispUpstreamUrl: "",
+        requireSession: false,
+      },
+    });
+    cleanups.push(() => app.stop());
+
+    const url = `http://127.0.0.1:${app.port}/alpine.erofs`;
+    const partial = await fetch(url, { headers: { Range: "bytes=0-1023" } });
+    expect(partial.status).toBe(206);
+    expect(partial.headers.get("accept-ranges")).toBe("bytes");
+    expect(partial.headers.get("content-range")).toBe(`bytes 0-1023/${payload.length}`);
+    expect((await partial.arrayBuffer()).byteLength).toBe(1024);
+
+    const clamped = await fetch(url, { headers: { Range: "bytes=0-262143" } });
+    expect(clamped.status).toBe(206);
+    expect(clamped.headers.get("content-range")).toBe(`bytes 0-${payload.length - 1}/${payload.length}`);
+    expect((await clamped.arrayBuffer()).byteLength).toBe(payload.length);
+
+    const invalid = await fetch(url, { headers: { Range: `bytes=${payload.length}-` } });
+    expect(invalid.status).toBe(416);
+    expect(invalid.headers.get("content-range")).toBe(`bytes */${payload.length}`);
+
+    const httpBase = await HttpBase.open(url, { chunkSize: 16384, strict: true, prefetch: false });
+    expect(httpBase.size).toBe(payload.length);
+    const slice = await httpBase.read(20000, 128);
+    expect(slice).toEqual(payload.subarray(20000, 20128));
   });
 });

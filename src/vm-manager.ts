@@ -22,7 +22,7 @@ import {
   type NetSpec,
   type Pty,
   type PtyEnd,
-} from "@vod-studio/unkernel";
+} from "unkernel";
 import { BrowserDirectoryFs } from "./fs-bridge.ts";
 import {
   MEMORY_FALLBACK_MIB,
@@ -32,11 +32,12 @@ import {
 } from "./memory-config.ts";
 
 export const DISK_NAME = "unkernel-nvim";
-export const DISK_VERSION = "v1";
+export const DISK_VERSION = "v2"; // v2: aarch64 + unkernel 0.2.0 distro overlay layout
 export const DISK_SIZE_BYTES = 4 * 1024 * 1024 * 1024; // 4 GiB kwdata template size
+export const DISTRO_URL = "/alpine.erofs";
 export const PREBAKED_DISK_URL = "/nvim-data.kwsparse.gz";
 const CPU_STORAGE_KEY = "unkernel-nvim.cpus";
-const MAX_CPUS = 8; // CONFIG_NR_CPUS in the bundled SMP kernel
+const MAX_CPUS = 16; // CONFIG_NR_CPUS in the bundled SMP kernel
 const SNAPSHOT_DB_NAME = "unkernel-nvim-snapshots";
 const SNAPSHOT_STORE = "snapshots";
 const SNAPSHOT_KEY = "latest";
@@ -55,10 +56,10 @@ export interface MountedFolder {
 }
 
 /**
- * Fast probe of IndexedDB `kwdisk:unkernel-nvim-v1` to check whether the
+ * Fast probe of IndexedDB `kwdisk:unkernel-nvim-v2` to check whether the
  * persistent data disk has already been seeded on a previous visit.
  * When true, we pass a 24-byte empty kwsparse header as `template`, skipping
- * the 44 MiB `/nvim-data.kwsparse.gz` download completely!
+ * the prebaked `/nvim-data.kwsparse.gz` download completely!
  */
 export async function isDataDiskSeeded(): Promise<boolean> {
   if (typeof indexedDB === "undefined") return false;
@@ -392,6 +393,7 @@ export class VmManager {
 
     this.vm = await createKernel({
       worker: true,
+      distro: DISTRO_URL,
       cpus,
       jit: true,
       vsock: true,
@@ -455,6 +457,7 @@ export class VmManager {
     const args = mode === "nvim" ? [] : ["-l"];
 
     const pty = await this.vm.spawn(file, args, {
+      user: "root",
       cols: size.cols,
       rows: size.rows,
       xpixel: size.xpixel,
