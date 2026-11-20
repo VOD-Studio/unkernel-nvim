@@ -4,8 +4,10 @@
 // and security model as the production Bun server (`server/index.ts`).
 
 import type { ServerWebSocket } from "bun";
+import { existsSync, linkSync, mkdirSync, rmSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
 import { createConnection } from "node:net";
+import { dirname, join } from "node:path";
 import type { Duplex } from "node:stream";
 import { defineConfig, type Connect, type Plugin } from "vite";
 import { formatProxyForLog, loadConfig } from "./server/config.ts";
@@ -18,6 +20,7 @@ import {
 } from "./server/security.ts";
 import { createWispEngine, createWispSocketData, type WispSocketData } from "./server/wisp-core.ts";
 import { createGatewaySocketData, createWispGateway, type GatewaySocketData } from "./server/wisp-gateway.ts";
+import { DISTRO_ASSETS, releaseGuestAssetPath } from "./src/distro.ts";
 
 type DevSocketData = WispSocketData | GatewaySocketData;
 
@@ -174,8 +177,27 @@ function localWispPlugin(): Plugin {
   };
 }
 
+function versionGuestAssets(): Plugin {
+  return {
+    name: "unkernel-version-guest-assets",
+    apply: "build",
+    writeBundle({ dir }) {
+      if (!dir) return;
+      for (const asset of DISTRO_ASSETS) {
+        const input = join(dir, asset);
+        if (!existsSync(input)) continue;
+        const output = join(dir, releaseGuestAssetPath(asset));
+        mkdirSync(dirname(output), { recursive: true });
+        rmSync(output, { force: true });
+        linkSync(input, output);
+      }
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [localWispPlugin()],
+  base: "./",
+  plugins: [localWispPlugin(), versionGuestAssets()],
   server: {
     port: 5173,
     headers: crossOriginHeaders,

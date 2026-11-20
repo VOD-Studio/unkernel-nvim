@@ -26,7 +26,7 @@ import {
   type Pty,
   type PtyEnd,
 } from "unkernel";
-import { DEFAULT_DISTRO, DISTROS, isDistro, type Distro } from "./distro.ts";
+import { DEFAULT_DISTRO, DISTROS, isDistro, releaseGuestAssetPath, type Distro } from "./distro.ts";
 import { BrowserDirectoryFs } from "./fs-bridge.ts";
 import {
   MEMORY_FALLBACK_MIB,
@@ -107,8 +107,14 @@ async function isDataDiskSeeded(name: string): Promise<boolean> {
 export type NetMode = "builtin" | "custom" | "off";
 
 export function getSameOriginWispUrl(): string {
-  const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${location.host}/wisp`;
+  const url = new URL("wisp", location.href);
+  url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  return url.href;
+}
+
+function getGuestAssetUrl(asset: string): string {
+  const relativePath = import.meta.env.DEV ? asset.slice(1) : releaseGuestAssetPath(asset);
+  return new URL(relativePath, location.href).href;
 }
 
 function loadInitialNetMode(savedCustomUrl: string): NetMode {
@@ -306,7 +312,7 @@ export class VmManager {
       this.#onStatus({ phase: "disk-download", title, progress: 0 });
       let lastUpdate = performance.now();
       try {
-        bytes = await download(template, {
+        bytes = await download(getGuestAssetUrl(template), {
           signal,
           onProgress: ({ loaded, total, done }) => {
             const now = performance.now();
@@ -412,7 +418,7 @@ export class VmManager {
     const vm = await createKernel({
       kernel,
       worker: true,
-      distro: image,
+      distro: getGuestAssetUrl(image),
       cpus,
       jit: true,
       vsock: true,

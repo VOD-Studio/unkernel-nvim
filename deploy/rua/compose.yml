@@ -1,0 +1,13 @@
+services:
+  app:
+    environment:
+      VIRTUAL_HOST: projects.rua.plus
+      VIRTUAL_PORT: "3000"
+      VIRTUAL_PATH: /unkernel-nvim/
+      VIRTUAL_DEST: /
+    networks:
+      - nginx-proxy
+
+networks:
+  nginx-proxy:
+    external: true

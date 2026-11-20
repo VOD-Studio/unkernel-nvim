@@ -97,6 +97,8 @@ docker compose pull
 docker compose up -d --no-build --pull never
 ```
 
+反向代理可以把应用挂载在 `/unkernel-nvim/` 一类的子路径，入口 URL 以 `/` 结尾。代理应去掉路径前缀后转发到 Bun，并允许同一路径下的 Wisp WebSocket 升级。`deploy/rua/` 提供 `projects.rua.plus` 使用的 Podman Compose 补充配置和 systemd 单元。虚拟机文件由构建放在 `releases/v<版本号>/`，可按版本在 CDN 缓存。
+
 ### 部署方式 B：单进程一体化部署（简单轻量）
 
 如果不拆分独立 Wisp 进程，留空 `WISP_UPSTREAM_URL` 即可在同一 Bun 进程内运行静态站点与 Wisp 引擎：

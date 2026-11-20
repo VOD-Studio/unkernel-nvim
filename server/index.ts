@@ -192,7 +192,7 @@ export function startAppServer(opts: { config?: Partial<ServerConfig>; distDir?:
           const secure = isHttpsRequest(req, config.trustProxy);
           headers.append("Set-Cookie", buildSessionSetCookieHeader(config.sessionSecret, config.sessionTtlSeconds, secure));
         }
-      } else if (url.pathname.startsWith("/assets/")) {
+      } else if (url.pathname.startsWith("/assets/") || url.pathname.startsWith("/releases/")) {
         headers.set("Cache-Control", "public, max-age=31536000, immutable");
       } else {
         headers.set("Cache-Control", "public, max-age=3600");
