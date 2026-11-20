@@ -226,6 +226,13 @@ describe("gateway <-> authenticated Wisp end-to-end", () => {
     for (const fn of cleanups.reverse()) fn();
   });
 
+  function createTestDist(): string {
+    const distDir = mkdtempSync(path.join(tmpdir(), "unkernel-nvim-test-"));
+    cleanups.push(() => rmSync(distDir, { recursive: true, force: true }));
+    writeFileSync(path.join(distDir, "index.html"), "<!doctype html><html></html>");
+    return distDir;
+  }
+
   function startEchoTcpServer(): Promise<{ server: TcpServer; port: number }> {
     return new Promise((resolve) => {
       const server = createServer((sock) => {
@@ -283,6 +290,7 @@ describe("gateway <-> authenticated Wisp end-to-end", () => {
 
     // 2. Start unified App server in gateway mode pointing to the private Wisp server
     const app = startAppServer({
+      distDir: createTestDist(),
       config: {
         host: "127.0.0.1",
         port: 0,
@@ -368,6 +376,7 @@ describe("gateway <-> authenticated Wisp end-to-end", () => {
 
     // Built-in mode with strict SSRF (allowPrivateIps: false) and strict host allowlist
     const app = startAppServer({
+      distDir: createTestDist(),
       config: {
         host: "127.0.0.1",
         port: 0,
@@ -426,6 +435,7 @@ describe("gateway <-> authenticated Wisp end-to-end", () => {
     const { port: echoPort } = await startEchoTcpServer();
 
     const app = startAppServer({
+      distDir: createTestDist(),
       config: {
         host: "127.0.0.1",
         port: 0,
@@ -477,6 +487,7 @@ describe("gateway <-> authenticated Wisp end-to-end", () => {
     cleanups.push(() => wisp.stop());
 
     const app = startAppServer({
+      distDir: createTestDist(),
       config: {
         host: "127.0.0.1",
         port: 0,
@@ -499,9 +510,7 @@ describe("gateway <-> authenticated Wisp end-to-end", () => {
   });
 
   test("static asset server supports HTTP Range requests for unkernel HttpBase distro images", async () => {
-    const tmpDist = mkdtempSync(path.join(tmpdir(), "unkernel-nvim-range-"));
-    cleanups.push(() => rmSync(tmpDist, { recursive: true, force: true }));
-    writeFileSync(path.join(tmpDist, "index.html"), "<!doctype html><html></html>");
+    const tmpDist = createTestDist();
     const payload = new Uint8Array(65536);
     for (let i = 0; i < payload.length; i++) payload[i] = i & 0xff;
     writeFileSync(path.join(tmpDist, "alpine.erofs"), payload);
@@ -616,6 +625,7 @@ describe("gateway <-> authenticated Wisp end-to-end", () => {
 
     // 1. Proxied connection (noProxy does not include 127.0.0.1)
     const appProxied = startAppServer({
+      distDir: createTestDist(),
       config: {
         host: "127.0.0.1",
         port: 0,
