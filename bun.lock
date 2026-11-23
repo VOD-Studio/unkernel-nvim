@@ -10,7 +10,7 @@
         "@xterm/addon-unicode11": "^0.9.0",
         "@xterm/addon-webgl": "^0.19.0",
         "@xterm/xterm": "^6.0.0",
-        "unkernel": "0.2.0-261119-040e142",
+        "unkernel": "0.2.0-261122-4e58555",
       },
       "devDependencies": {
         "@types/bun": "^1.4.4",
@@ -174,7 +174,7 @@
 
     "undici-types": ["undici-types@8.9.0", "https://registry.npmmirror.com/undici-types/-/undici-types-8.9.0.tgz", {}, "sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg=="],
 
-    "unkernel": ["unkernel@0.2.0-261119-040e142", "https://registry.npmmirror.com/unkernel/-/unkernel-0.2.0-261119-040e142.tgz", { "bin": { "unkernel": "dist/cli.mjs" } }, "sha512-FIhmd2Fh9xBg0Zt2YVUvVOkQnoerPS+oCnOhb8HpY6A4nrQbaXrhX06PsYi5hoDgm/krSqeiXlwPjSF7BkdgTg=="],
+    "unkernel": ["unkernel@0.2.0-261122-4e58555", "https://registry.npmmirror.com/unkernel/-/unkernel-0.2.0-261122-4e58555.tgz", { "bin": { "unkernel": "dist/cli.mjs" } }, "sha512-5wGoXEn1ZpesOpjhtsrOMUQpzhI8LclplsZcyMk5F0JFhp96ciDTVcwQjn8S1dgeQpUjpekWqh9I5QfPN3AqeQ=="],
 
     "vite": ["vite@8.3.8", "https://registry.npmmirror.com/vite/-/vite-8.3.8.tgz", { "dependencies": { "lightningcss": "^1.33.0", "picomatch": "^4.0.7", "postcss": "^8.5.32", "rolldown": "~1.2.18", "tinyglobby": "^0.2.17" }, "optionalDependencies": { "fsevents": "~2.3.3" }, "peerDependencies": { "@types/node": "^20.19.0 || >=22.12.0", "@vitejs/devtools": "^0.7.1 || ^0.8.0", "esbuild": "^0.27.0 || ^0.28.0", "jiti": ">=1.21.0", "less": "^4.0.0", "sass": "^1.70.0", "sass-embedded": "^1.70.0", "stylus": ">=0.54.8", "sugarss": "^5.0.0", "terser": "^5.16.0", "tsx": "^4.8.1", "yaml": "^2.4.2" }, "optionalPeers": ["@types/node", "@vitejs/devtools", "esbuild", "jiti", "less", "sass", "sass-embedded", "stylus", "sugarss", "terser", "tsx", "yaml"], "bin": { "vite": "bin/vite.js" } }, "sha512-LzOn3h9rG/0vhLdXrV4yJ4QFA9eEoqCl+Yx+kGJd7aB9w6nfNgVHKSYwLPZUHrz4ZGa+t+kXjV9itvcHDLQouA=="],
   }
