@@ -59,6 +59,71 @@ body {
   overflow: hidden;
 }
 
+.preview-open {
+  --preview-width: clamp(360px, 48vw, 960px);
+}
+
+.preview-open #terminal-stage {
+  width: calc(100% - var(--preview-width));
+}
+
+.preview-open .menu-pill {
+  right: calc(var(--preview-width) + 14px);
+}
+
+.guest-preview:not([hidden]) {
+  position: fixed;
+  inset: 0 0 0 auto;
+  z-index: 25;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  width: var(--preview-width);
+  overflow: hidden;
+  border-left: 1px solid var(--clay-border);
+  background: var(--clay-float);
+}
+
+.guest-preview-toolbar {
+  display: grid;
+  grid-template-columns: auto 5rem minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px 4px;
+  font-size: 12px;
+}
+
+.guest-preview-toolbar .text-input {
+  min-width: 0;
+  width: 100%;
+}
+
+.guest-preview-status {
+  padding: 4px 12px 10px;
+  color: var(--clay-muted);
+  font-size: 12px;
+}
+
+.guest-preview-frame-area iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+@media (max-width: 700px) {
+  .preview-open {
+    --preview-width: 100%;
+  }
+
+  .preview-open #terminal-stage {
+    width: 100%;
+  }
+
+  .preview-open .menu-pill {
+    visibility: hidden;
+  }
+}
+
 #terminal-stage .xterm {
   width: 100%;
   height: 100%;

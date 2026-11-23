@@ -3,6 +3,7 @@
 // WorkerKernel VM manager, boot progress overlay, and modal control center.
 
 import { DISTROS } from "./distro.ts";
+import { GuestPreview } from "./guest-preview.ts";
 import { ModalController } from "./modal.ts";
 import { ResumeSessionError } from "./suspended-session.ts";
 import { CanvasTerminal, SHELL_SCROLLBACK_LINES } from "./terminal.ts";
@@ -68,6 +69,7 @@ function updateBootOverlay(s: BootStatusUpdate): void {
   }
   if (s.phase === "suspended") {
     modal?.close();
+    preview.close();
     bootOverlayEl.classList.remove("fade-out");
     bootBarFillEl.classList.remove("indeterminate");
     bootBarFillEl.style.width = "100%";
@@ -103,6 +105,8 @@ const vmManager = new VmManager({
   },
 });
 
+const preview = new GuestPreview(() => vmManager.vm, () => terminal.focus());
+
 resumeButton.addEventListener("click", () => location.reload());
 discardButton.addEventListener("click", async () => {
   if (!confirm("确定放弃挂起的会话并启动新会话吗？已落盘的文件会保留。")) return;
@@ -121,6 +125,7 @@ modal = new ModalController({
   pill: pillBtn,
   vmManager,
   terminal,
+  onOpenPreview: () => preview.open(),
   toast: showToast,
   onSessionChange: (mode) => {
     pillLabelEl.textContent = mode === "nvim" ? "nvim" : vmManager.shellName;

@@ -11,6 +11,7 @@ import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { formatProxyForLog, loadConfig, type ServerConfig } from "./config.ts";
+import { configuredGuestPreviewUrl, guestPreviewFile, isGuestPreviewHost } from "./guest-preview-config.ts";
 import {
   buildSessionSetCookieHeader,
   getClientIp,
@@ -121,6 +122,16 @@ export function startAppServer(opts: { config?: Partial<ServerConfig>; distDir?:
 
     fetch(req, srv) {
       const url = new URL(req.url);
+      const previewAsset = guestPreviewFile(url.pathname);
+      if (isGuestPreviewHost(url.hostname) !== (previewAsset !== undefined)) {
+        return new Response("Not Found", { status: 404, headers: baseSecurityHeaders() });
+      }
+
+      if (url.pathname === "/guest-preview-config.json") {
+        return Response.json({ url: configuredGuestPreviewUrl()?.href ?? "" }, {
+          headers: { ...baseSecurityHeaders(), "Cache-Control": "no-store" },
+        });
+      }
 
       if (url.pathname === "/healthz") {
         return Response.json(
@@ -179,13 +190,18 @@ export function startAppServer(opts: { config?: Partial<ServerConfig>; distDir?:
       const etag = `W/"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`;
 
       const headers = new Headers(baseSecurityHeaders());
+      if (previewAsset === "guest-preview.html") {
+        headers.set("Cross-Origin-Resource-Policy", "cross-origin");
+      }
       headers.set("Content-Type", contentType);
       headers.set("Accept-Ranges", "bytes");
       headers.set("Content-Length", String(st.size));
       headers.set("ETag", etag);
 
       const isIndex = url.pathname === "/" || url.pathname === "/index.html";
-      if (isIndex) {
+      if (previewAsset) {
+        headers.set("Cache-Control", "no-cache");
+      } else if (isIndex) {
         headers.set("Cache-Control", "no-cache");
         // Issue frictionless short-lived HttpOnly session cookie (no login prompt)
         if (!hasValidSessionCookie(req.headers.get("cookie"), config.sessionSecret)) {

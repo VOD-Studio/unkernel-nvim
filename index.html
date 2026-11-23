@@ -18,6 +18,18 @@
     <!-- Fullscreen 100vw x 100vh WebGL2 Terminal Stage -->
     <main id="terminal-stage" aria-label="Neovim Terminal Canvas"></main>
 
+    <section class="guest-preview" id="guest-preview" aria-label="Guest 端口预览" hidden>
+      <form class="guest-preview-toolbar">
+        <label for="guest-preview-port">端口</label>
+        <input class="text-input" id="guest-preview-port" type="number" min="1" max="65535" step="1" inputmode="numeric" required />
+        <input class="text-input" id="guest-preview-path" aria-label="路径" type="text" value="/" spellcheck="false" />
+        <button class="mini-btn active" id="btn-load-preview" type="submit">打开</button>
+        <button class="mini-btn" id="btn-close-preview" type="button">关闭</button>
+      </form>
+      <div class="guest-preview-status" id="guest-preview-status" role="status">运行 guest Web 服务后，输入其端口。</div>
+      <div class="guest-preview-frame-area" id="guest-preview-frame-area"></div>
+    </section>
+
     <!-- Minimal Boot Overlay (fades out automatically once Neovim renders) -->
     <div id="boot-overlay" class="boot-overlay">
       <div class="boot-card">

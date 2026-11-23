@@ -42,6 +42,12 @@ bun run dev
 
 多核（SMP）需要跨源隔离和 `Atomics.waitAsync`。项目已设置 COOP / COEP 响应头，请通过 HTTPS 或 `localhost` 访问。在 **存储与备份 → 挂起会话** 可以保存单核或多核虚拟机的内存和终端。点击 **恢复会话** 或重新打开页面，即可回到原来的 Neovim 或 Shell。挂起前需卸载直通的本地目录。
 
+### Guest 端口预览
+
+在 guest 内启动 Web 服务，例如 `npm run dev -- --host 127.0.0.1`。打开 **工作区与会话 → Guest 端口预览**，输入服务端口与路径。预览会跟终端并排显示，并将 HTTP 请求和 WebSocket 转发到 guest，Vite 等开发服务器可以在其中热更新。
+
+本地应用自动使用同一端口上的 `unkernel-preview.localhost`。公网部署需将独立 HTTPS 主机名的预览目录设为 `GUEST_PREVIEW_URL`，例如 `https://preview.example.com/unkernel-nvim/`。可以将预览主机名转发到同一 Bun 服务，反向代理需保留原始 `Host` 并去掉部署路径前缀。该主机名只提供预览文件。若使用独立静态站点，复制 `dist/guest-preview*`，并为 `guest-preview.html` 设置 `Cross-Origin-Embedder-Policy: require-corp` 和 `Cross-Origin-Resource-Policy: cross-origin`。
+
 ### 常用命令
 
 | 命令 | 说明 |

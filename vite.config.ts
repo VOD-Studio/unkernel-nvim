@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import type { Duplex } from "node:stream";
 import { defineConfig, type Connect, type Plugin } from "vite";
 import { formatProxyForLog, loadConfig } from "./server/config.ts";
+import { guestPreviewFile, isGuestPreviewHost } from "./server/guest-preview-config.ts";
 import {
   buildSessionSetCookieHeader,
   getClientIp,
@@ -46,7 +47,7 @@ function attachDevWisp(
     port: 0,
     fetch(req, srv) {
       const url = new URL(req.url);
-      if (url.pathname !== config.wispPath) {
+      if (url.pathname !== config.wispPath || isGuestPreviewHost(url.hostname)) {
         return new Response("Not Found", { status: 404 });
       }
       if (!isOriginAllowed(req, config.allowedOrigins, config.trustProxy)) {
@@ -177,6 +178,25 @@ function localWispPlugin(): Plugin {
   };
 }
 
+function previewBridgeHeaders(): Plugin {
+  const applyHeaders = (server: { middlewares: Connect.Server }) => {
+    server.middlewares.use((req, res, next) => {
+      const host = URL.parse(`http://${req.headers.host ?? "localhost"}`)?.hostname ?? "";
+      const asset = guestPreviewFile(req.url?.split("?", 1)[0] ?? "");
+      if (isGuestPreviewHost(host) !== (asset !== undefined)) {
+        res.statusCode = 404;
+        res.end("Not Found");
+        return;
+      }
+      if (asset === "guest-preview.html") {
+        res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+      }
+      next();
+    });
+  };
+  return { name: "unkernel-preview-bridge-headers", configureServer: applyHeaders, configurePreviewServer: applyHeaders };
+}
+
 function versionGuestAssets(): Plugin {
   return {
     name: "unkernel-version-guest-assets",
@@ -197,7 +217,7 @@ function versionGuestAssets(): Plugin {
 
 export default defineConfig({
   base: "./",
-  plugins: [localWispPlugin(), versionGuestAssets()],
+  plugins: [previewBridgeHeaders(), localWispPlugin(), versionGuestAssets()],
   server: {
     port: 5173,
     headers: crossOriginHeaders,

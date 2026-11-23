@@ -37,6 +37,7 @@ export interface ModalControllerOptions {
   pill: HTMLButtonElement;
   vmManager: VmManager;
   terminal: CanvasTerminal;
+  onOpenPreview: () => void;
   toast: (msg: string) => void;
   onSessionChange?: (mode: SessionMode) => void;
 }
@@ -49,6 +50,7 @@ export class ModalController {
   #terminal: CanvasTerminal;
   #toast: (msg: string) => void;
   #onSessionChange?: (mode: SessionMode) => void;
+  #onOpenPreview: () => void;
   #tab: ModalTab = "workspace";
   #open = false;
   #pillHidden = localStorage.getItem("unkernel-nvim.hidePill") === "1";
@@ -64,6 +66,7 @@ export class ModalController {
     this.#terminal = opts.terminal;
     this.#toast = opts.toast;
     this.#onSessionChange = opts.onSessionChange;
+    this.#onOpenPreview = opts.onOpenPreview;
 
     if (this.#pillHidden) {
       this.#pill.classList.add("hidden-pill");
@@ -257,6 +260,10 @@ export class ModalController {
           <button class="modal-btn" id="btn-switch-shell" type="button">
             <span>${activePty && currentMode === "shell" ? "重启" : "打开"} ${distro} Shell</span>
             <span class="modal-btn-desc">打开 ${escapeHtml(this.#vmManager.shellName)} 终端命令行</span>
+          </button>
+          <button class="modal-btn" id="btn-open-preview" type="button">
+            <span>Guest 端口预览</span>
+            <span class="modal-btn-desc">打开虚拟机内的网页与开发服务器</span>
           </button>
         </div>
         <div class="row-bar">
@@ -553,6 +560,12 @@ export class ModalController {
 
     q("#btn-switch-shell").addEventListener("click", () => {
       void this.#switchSession("shell");
+    });
+
+    q("#btn-open-preview").addEventListener("click", () => {
+      if (this.#diskAction) return;
+      this.close();
+      this.#onOpenPreview();
     });
 
     const fontLabel = panel.querySelector("#label-font-size")!;
