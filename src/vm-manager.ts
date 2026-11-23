@@ -10,7 +10,6 @@ import {
   decodeKwsparse,
   decodeSnapshot,
   download,
-  encodeSnapshot,
   gzipBlob,
   gunzipIfNeeded,
   importDataDisk,
@@ -23,10 +22,12 @@ import {
   type DiskSpec,
   type InstanceStats,
   type KernelHandle,
+  type KernelSnapshot,
   type Mount,
   type NetSpec,
   type Pty,
   type PtyEnd,
+  type PtySize,
 } from "unkernel";
 import { DEFAULT_DISTRO, DISTROS, isDistro, releaseGuestAssetPath, type Distro } from "./distro.ts";
 import { DEFAULT_DISK_GIB, GIB, MAX_DISK_GIB, parseDiskGiB } from "./disk-config.ts";
@@ -37,6 +38,14 @@ import {
   parseMemorySpec,
   type MemoryConfigMiB,
 } from "./memory-config.ts";
+import {
+  deleteSuspendedSession,
+  readSuspendedSession,
+  ResumeSessionError,
+  writeSuspendedSession,
+  type SessionMetadata,
+  type SuspendedSession,
+} from "./suspended-session.ts";
 
 const DISK_VERSION = "v2"; // aarch64 + unkernel 0.2.0 distro overlay layout
 const DISK_SIZE_BYTES = DEFAULT_DISK_GIB * GIB;
@@ -45,8 +54,6 @@ const FALLBACK_SHELL = "/bin/sh";
 const CPU_STORAGE_KEY = "unkernel-nvim.cpus";
 const DISTRO_STORAGE_KEY = "unkernel-nvim.distro";
 const MAX_CPUS = 16; // CONFIG_NR_CPUS in the upstream SMP kernel
-const SNAPSHOT_DB_NAME = "unkernel-nvim-snapshots";
-const SNAPSHOT_STORE = "snapshots";
 
 function acquireDiskLock(name: string): Promise<() => void> {
   if (!navigator.locks) return Promise.resolve(() => {});
@@ -63,7 +70,7 @@ function diskSizeKey(distro: Distro): string {
 }
 
 export interface BootStatusUpdate {
-  phase: "check" | "disk-check" | "disk-download" | "compile" | "boot" | "userspace" | "ready";
+  phase: "check" | "disk-check" | "disk-download" | "compile" | "boot" | "userspace" | "ready" | "suspended";
   title: string;
   detail?: string;
   progress?: number; // 0..1
@@ -174,6 +181,7 @@ export class VmManager {
   #cpuCount = this.#loadCpuCount();
   #bootCpuCount: number | null = null;
   #onlineCpuCount: number | null = null;
+  #suspending = false;
   #shellPath: string | null = null;
   memoryConfigMiB: MemoryConfigMiB = loadStoredMemoryConfig();
   urlMemoryOverride: MemoryConfigMiB | undefined = loadUrlMemoryOverride();
@@ -329,13 +337,16 @@ export class VmManager {
 
   #onStatus: (s: BootStatusUpdate) => void;
   #onSessionExit?: (mode: "nvim" | "shell", end: PtyEnd) => void;
+  #onNotice?: (message: string) => void;
 
   constructor(opts: {
     onStatus: (s: BootStatusUpdate) => void;
     onSessionExit?: (mode: "nvim" | "shell", end: PtyEnd) => void;
+    onNotice?: (message: string) => void;
   }) {
     this.#onStatus = opts.onStatus;
     this.#onSessionExit = opts.onSessionExit;
+    this.#onNotice = opts.onNotice;
   }
 
   async #prepareDataDisk(distro: Distro, signal: AbortSignal): Promise<Uint8Array> {
@@ -378,22 +389,53 @@ export class VmManager {
     return bytes;
   }
 
-  async boot(cols: number, rows: number): Promise<void> {
+  async boot(cols: number, rows: number, pixels: Pick<PtySize, "xpixel" | "ypixel"> = {}): Promise<Pty | undefined> {
     const distro = this.#distro;
     const release = await acquireDiskLock(DISTROS[distro].diskName);
+    let saved: SuspendedSession | undefined;
     try {
-      await this.#boot(cols, rows);
+      saved = await readSuspendedSession(distro);
+      if (!saved) {
+        await this.#boot(cols, rows);
+        return;
+      }
+      this.#onStatus({ phase: "boot", title: "正在读取挂起会话…" });
+      const snapshot = decodeSnapshot(new Uint8Array(await saved.snapshot.arrayBuffer()));
+      const vm = await this.#boot(cols, rows, snapshot, saved.network);
+      await deleteSuspendedSession(distro, saved.id).catch(() => {
+        this.#onNotice?.("会话已恢复，但无法清除旧快照");
+      });
+      const size = { cols, rows, ...pixels };
+      if (saved.terminalId) {
+        try {
+          this.#shellPath = saved.shell;
+          const pty = await vm.attach(saved.terminalId, { ...size, timeout: 8000 });
+          return this.#setSession(pty, saved.mode, saved.cwd);
+        } catch {
+          this.#onNotice?.("虚拟机已恢复。原终端已结束，正在打开新会话。");
+        }
+      }
+      return await this.startSession(saved.mode, size, saved.cwd);
     } catch (err) {
+      if (this.vm) await this.vm.stop().catch(() => {});
+      this.vm = null;
       release();
+      if (saved) throw new ResumeSessionError(err);
       throw err;
     }
   }
 
-  async #boot(cols: number, rows: number): Promise<void> {
+  async #boot(
+    cols: number,
+    rows: number,
+    restore?: KernelSnapshot,
+    network = { mode: this.netMode, servers: this.getEffectiveWispServers() },
+  ): Promise<KernelHandle> {
     const distro = this.#distro;
     const { diskName, image, label } = DISTROS[distro];
     this.#bootDistro = distro;
-    const cpus = this.#cpuCount;
+    const cpus = restore ? restore.cpus ?? 1 : this.#cpuCount;
+    if (cpus > this.cpuLimit) throw new Error(`该会话需要 ${cpus} 个 CPU 核，当前浏览器支持 ${this.cpuLimit} 核`);
     this.#bootCpuCount = cpus;
     this.#onlineCpuCount = null;
     this.#onStatus({ phase: "check", title: "检查浏览器 WebAssembly / JSPI 环境…" });
@@ -422,19 +464,18 @@ export class VmManager {
       version: DISK_VERSION,
       template: templateBytes,
       mode: "persistent",
-      size: this.#configuredDiskSize(distro),
+      size: restore ? undefined : this.#configuredDiskSize(distro),
     };
 
-    const wispServers = this.getEffectiveWispServers();
-    const network = { mode: this.netMode, servers: [...wispServers] };
     const netSpec: NetSpec | undefined =
-      wispServers.length > 0
+      (restore ? restore.devices.network : network.servers.length > 0)
         ? {
             kind: "net",
             backend: {
               kind: "wisp",
-              servers: wispServers,
+              servers: network.servers,
             },
+            mac: restore?.devices.network?.mac.map((byte) => byte.toString(16).padStart(2, "0")).join(":"),
             optional: true,
           }
         : undefined;
@@ -455,13 +496,14 @@ export class VmManager {
       } else if (p.stage === "start") {
         this.#onStatus({
           phase: "boot",
-          title: this.seededFromCache ? `正在挂载 ${label} 持久化磁盘…` : `正在初始化持久化磁盘并引导 ${label}…`,
+          title: restore ? `正在恢复 ${label} 会话…` :
+            this.seededFromCache ? `正在挂载 ${label} 持久化磁盘…` : `正在初始化持久化磁盘并引导 ${label}…`,
         });
       }
     };
 
     const effectiveMemory = this.getEffectiveMemoryConfig();
-    const targetMemoryMiB = effectiveMemory ?? this.getAutoMemoryInfo().mib;
+    const targetMemoryMiB = restore ? restore.memory.byteLength / 1048576 : effectiveMemory ?? this.getAutoMemoryInfo().mib;
     this.memoryRequestedMiB = null;
     this.memoryAllocatedMiB = null;
     this.memoryFallbackReasons = [];
@@ -469,6 +511,8 @@ export class VmManager {
     const vm = await createKernel({
       kernel,
       worker: true,
+      transferRestore: true,
+      restore,
       distro: getGuestAssetUrl(image),
       cpus,
       jit: true,
@@ -511,6 +555,7 @@ export class VmManager {
     window.addEventListener("pagehide", () => {
       void this.syncDisk();
     });
+    return vm;
   }
 
   async #resolveShell(vm: KernelHandle | null = this.vm): Promise<string> {
@@ -539,7 +584,7 @@ export class VmManager {
     size: { cols: number; rows: number; xpixel?: number; ypixel?: number },
     targetPath?: string,
   ): Promise<Pty> {
-    if (!this.vm) throw new Error("Kernel is not running");
+    if (!this.vm || this.#suspending) throw new Error("虚拟机当前无法打开终端");
     const previousPty = this.activePty;
     if (previousPty) {
       this.activePty = null;
@@ -560,6 +605,7 @@ export class VmManager {
 
     const pty = await this.vm.spawn(file, args, {
       user: "root",
+      detachable: true,
       cols: size.cols,
       rows: size.rows,
       xpixel: size.xpixel,
@@ -577,6 +623,10 @@ export class VmManager {
       },
     });
 
+    return this.#setSession(pty, mode, cwd);
+  }
+
+  #setSession(pty: Pty, mode: "nvim" | "shell", cwd: string): Pty {
     this.currentMode = mode;
     this.currentCwd = cwd;
     this.activePty = pty;
@@ -584,7 +634,7 @@ export class VmManager {
       (end) => {
         if (this.activePty === pty) {
           this.activePty = null;
-          this.#onSessionExit?.(mode, end);
+          if (!this.#suspending) this.#onSessionExit?.(mode, end);
         }
       },
       () => {},
@@ -595,7 +645,7 @@ export class VmManager {
   }
 
   async mountHostDirectory(dirFs: BrowserDirectoryFs): Promise<MountedFolder> {
-    if (!this.vm) throw new Error("Kernel is not running");
+    if (!this.vm || this.#suspending) throw new Error("虚拟机当前无法挂载目录");
     const safeName = dirFs.name.replace(/[^a-zA-Z0-9._-]/g, "_") || "project";
     const guestPath = `/workspace/${safeName}`;
 
@@ -612,7 +662,7 @@ export class VmManager {
   }
 
   async syncDisk(): Promise<boolean> {
-    if (!this.vm) return false;
+    if (!this.vm || this.#suspending) return false;
     return this.vm.sync({ timeout: 5000 }).catch(() => false);
   }
 
@@ -680,26 +730,70 @@ export class VmManager {
     }
     await resetDataDisk({ name: DISTROS[this.activeDistro].diskName, version: DISK_VERSION });
     localStorage.removeItem(diskSizeKey(this.activeDistro));
-    await this.clearSnapshot().catch(() => {});
+    await deleteSuspendedSession(this.activeDistro).catch(() => {});
     location.reload();
   }
 
-  async saveMemorySnapshot(): Promise<{ bytes: number }> {
-    if (!this.vm) throw new Error("Kernel is not running");
-    if ((this.#bootCpuCount ?? 1) > 1) {
-      throw new Error("多核模式暂不支持内存快照，可使用磁盘同步保存文件。");
+  async suspendSession(): Promise<void> {
+    const vm = this.vm;
+    if (!(vm instanceof WorkerKernel) || !vm.disks[0]?.persistent || !this.#bootedNetwork) {
+      throw new Error("挂起需要正在运行的虚拟机和持久化磁盘");
     }
+    if (this.#suspending) throw new Error("正在保存挂起会话");
+    if (this.hasPendingDistroChange()) throw new Error("请先应用发行版切换，或选回当前发行版后挂起");
     if (this.mountedFolders.size > 0) {
-      throw new Error("挂载了本地宿主机目录时不支持保存内存快照，请先卸载本地目录或直接使用磁盘持久化 (Sync)。");
+      throw new Error("请先卸载本地目录，再挂起虚拟机");
     }
-    const snap = await this.vm.snapshot({ stop: false });
-    const encoded = encodeSnapshot(snap);
-    await saveSnapshotBytes(snapshotKey(this.activeDistro), encoded);
-    return { bytes: encoded.byteLength };
+    const distro = this.activeDistro;
+    const session: SessionMetadata = {
+      id: Array.from(crypto.getRandomValues(new Uint32Array(4))).join("-"),
+      mode: this.currentMode,
+      cwd: this.currentCwd,
+      shell: this.shellPath,
+      terminalId: this.activePty?.sessionId,
+      network: this.#bootedNetwork,
+    };
+    if (this.activePty && !session.terminalId) throw new Error("此终端不支持续接，请重新打开终端后挂起");
+    this.#suspending = true;
+    let bytes = 0;
+    try {
+      await vm.snapshot({
+        dropCaches: true,
+        commitTimeoutMs: 60_000,
+        commit: async (snapshot, signal) => {
+          if (session.terminalId && !snapshot.ttys?.some((tty) => tty.id === session.terminalId)) {
+            throw new Error("终端会话已结束，请重试");
+          }
+          bytes = await writeSuspendedSession(distro, session, snapshot, signal);
+          if (signal.aborted) {
+            await deleteSuspendedSession(distro, session.id);
+            signal.throwIfAborted();
+          }
+        },
+      });
+      this.activePty = null;
+      this.vm = null;
+      this.#onStatus({
+        phase: "suspended",
+        title: `${DISTROS[distro].label} 已挂起`,
+        detail: `会话已保存到此浏览器 (${(bytes / 1048576).toFixed(1)} MiB)`,
+      });
+    } catch (err) {
+      if (bytes) await deleteSuspendedSession(distro, session.id).catch(() => {});
+      throw err;
+    } finally {
+      this.#suspending = false;
+    }
   }
 
-  async clearSnapshot(): Promise<void> {
-    await deleteSnapshotBytes(snapshotKey(this.activeDistro));
+  async discardSuspendedSession(): Promise<void> {
+    const release = await acquireDiskLock(DISTROS[this.#distro].diskName);
+    try {
+      await deleteSuspendedSession(this.#distro);
+    } finally {
+      release();
+    }
+    location.reload();
   }
 
   getStats(): {
@@ -732,48 +826,3 @@ export class VmManager {
     };
   }
 }
-
-function openSnapshotDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(SNAPSHOT_DB_NAME, 1);
-    req.onupgradeneeded = () => {
-      req.result.createObjectStore(SNAPSHOT_STORE);
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-function snapshotKey(distro: Distro): string {
-  return distro === "alpine" ? "latest" : distro;
-}
-
-async function saveSnapshotBytes(key: string, bytes: Uint8Array): Promise<void> {
-  const db = await openSnapshotDb();
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(SNAPSHOT_STORE, "readwrite");
-      tx.objectStore(SNAPSHOT_STORE).put(bytes, key);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
-  } finally {
-    db.close();
-  }
-}
-
-async function deleteSnapshotBytes(key: string): Promise<void> {
-  const db = await openSnapshotDb();
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(SNAPSHOT_STORE, "readwrite");
-      tx.objectStore(SNAPSHOT_STORE).delete(key);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
-  } finally {
-    db.close();
-  }
-}
-
-export { decodeSnapshot };

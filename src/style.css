@@ -168,6 +168,13 @@ body {
   overflow: hidden;
 }
 
+.boot-actions:not([hidden]) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
 .boot-bar-fill {
   height: 100%;
   width: 32%;

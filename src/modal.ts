@@ -15,11 +15,10 @@ import {
   validateCustomMemoryInput,
   type MemoryConfigMiB,
 } from "./memory-config.ts";
-import type { CanvasTerminal } from "./terminal.ts";
+import { SHELL_SCROLLBACK_LINES, type CanvasTerminal } from "./terminal.ts";
 import { getSameOriginWispUrl, type NetMode, type VmManager } from "./vm-manager.ts";
 
 const MODAL_TABS = ["workspace", "storage", "system"] as const;
-const SHELL_SCROLLBACK_LINES = 1_000;
 type ModalTab = (typeof MODAL_TABS)[number];
 type SessionMode = VmManager["currentMode"];
 type DiskAction = "storage" | "restart";
@@ -123,6 +122,7 @@ export class ModalController {
   }
 
   open(tab: ModalTab = this.#tab): void {
+    if (!this.#vmManager.vm) return;
     this.#open = true;
     this.render();
     this.#backdrop.classList.remove("hidden");
@@ -313,6 +313,10 @@ export class ModalController {
             <span>导入磁盘备份…</span>
             <span class="modal-btn-desc">从 ${distro} 的 .kwsparse.gz 备份恢复</span>
           </button>
+          <button class="modal-btn" id="btn-suspend-session" type="button">
+            <span>挂起会话</span>
+            <span class="modal-btn-desc">保存虚拟机内存与终端，稍后恢复</span>
+          </button>
         </div>
         <input type="file" id="input-import-disk" accept=".gz,.kwsparse" hidden />
       </div>
@@ -336,7 +340,7 @@ export class ModalController {
     const { cpuCount, cpuLimit, cpuBlocker } = this.#vmManager;
     const { activeDistro, distro } = this.#vmManager;
     const cpuLabel = diag.cpus === null ? "—" : `${diag.cpus} 核`;
-    let cpuHint = `此设备最多 ${cpuLimit} 核 · 内存快照支持单核模式`;
+    let cpuHint = `此设备最多 ${cpuLimit} 核`;
     if (cpuBlocker) {
       cpuHint = diag.crossOriginIsolated ? "当前浏览器环境仅支持单核" : "多核需要跨源隔离";
     } else if (cpuLimit === 1) {
@@ -607,6 +611,19 @@ export class ModalController {
       }
     }));
 
+    q("#btn-suspend-session").addEventListener("click", run(async () => {
+      if (this.#startingSession) {
+        this.#toast("请等待终端启动后再挂起");
+        return;
+      }
+      this.#toast("正在保存虚拟机内存与终端…");
+      try {
+        await this.#vmManager.suspendSession();
+      } catch (err) {
+        this.#toast(`挂起失败：${(err as Error)?.message ?? String(err)}`);
+      }
+    }));
+
     const fileInput = q<HTMLInputElement>("#input-import-disk");
     q("#btn-import-disk").addEventListener("click", () => {
       fileInput.click();
@@ -791,7 +808,7 @@ export class ModalController {
   }
 
   async #switchSession(mode: SessionMode, dir?: string): Promise<void> {
-    if (this.#startingSession) return;
+    if (this.#startingSession || this.#diskAction) return;
     this.#startingSession = true;
     try {
       const pty = await this.#vmManager.startSession(mode, this.#terminal.getSize(), dir);

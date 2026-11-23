@@ -4,7 +4,8 @@
 
 import { DISTROS } from "./distro.ts";
 import { ModalController } from "./modal.ts";
-import { CanvasTerminal } from "./terminal.ts";
+import { ResumeSessionError } from "./suspended-session.ts";
+import { CanvasTerminal, SHELL_SCROLLBACK_LINES } from "./terminal.ts";
 import { VmManager, type BootStatusUpdate } from "./vm-manager.ts";
 
 const stageEl = document.getElementById("terminal-stage")!;
@@ -13,6 +14,9 @@ const bootTitleEl = document.getElementById("boot-title")!;
 const bootDetailEl = document.getElementById("boot-detail")!;
 const bootBarFillEl = document.getElementById("boot-bar-fill")!;
 const bootBadgeEl = document.getElementById("boot-mode-badge")!;
+const bootActionsEl = document.getElementById("boot-actions")!;
+const resumeButton = document.querySelector<HTMLButtonElement>("#btn-resume-session")!;
+const discardButton = document.querySelector<HTMLButtonElement>("#btn-discard-session")!;
 const pillBtn = document.getElementById("menu-pill") as HTMLButtonElement;
 const pillLabelEl = document.getElementById("pill-label")!;
 const pillKbdEl = document.getElementById("pill-kbd")!;
@@ -62,7 +66,14 @@ function updateBootOverlay(s: BootStatusUpdate): void {
   } else {
     bootBarFillEl.classList.add("indeterminate");
   }
-  if (s.phase === "ready") {
+  if (s.phase === "suspended") {
+    modal?.close();
+    bootOverlayEl.classList.remove("fade-out");
+    bootBarFillEl.classList.remove("indeterminate");
+    bootBarFillEl.style.width = "100%";
+    bootActionsEl.hidden = false;
+    resumeButton.focus();
+  } else if (s.phase === "ready") {
     // Fallback hide in case first output arrived during transition
     setTimeout(hideBootOverlay, 120);
   }
@@ -80,6 +91,7 @@ const terminal = new CanvasTerminal({
 
 const vmManager = new VmManager({
   onStatus: updateBootOverlay,
+  onNotice: showToast,
   onSessionExit: (mode) => {
     pillLabelEl.textContent = `${mode} (exited)`;
     modal?.open("workspace");
@@ -89,6 +101,18 @@ const vmManager = new VmManager({
         : "Shell 会话已结束",
     );
   },
+});
+
+resumeButton.addEventListener("click", () => location.reload());
+discardButton.addEventListener("click", async () => {
+  if (!confirm("确定放弃挂起的会话并启动新会话吗？已落盘的文件会保留。")) return;
+  discardButton.disabled = true;
+  try {
+    await vmManager.discardSuspendedSession();
+  } catch (err) {
+    bootDetailEl.textContent = err instanceof Error ? err.message : String(err);
+    discardButton.disabled = false;
+  }
 });
 
 modal = new ModalController({
@@ -111,11 +135,11 @@ async function bootApp(): Promise<void> {
       : "aarch64 · Worker";
 
     const size = terminal.getSize();
-    await vmManager.boot(size.cols, size.rows);
-
-    const pty = await vmManager.startSession("nvim", terminal.getSize(), "/workspace");
-    pillLabelEl.textContent = "nvim";
-    terminal.attachPty(pty);
+    const restored = await vmManager.boot(size.cols, size.rows, size);
+    const pty = restored ?? await vmManager.startSession("nvim", terminal.getSize(), "/workspace");
+    const shell = vmManager.currentMode === "shell";
+    pillLabelEl.textContent = shell ? vmManager.shellName : "nvim";
+    terminal.attachPty(pty, shell ? SHELL_SCROLLBACK_LINES : 0);
     if (vmManager.didMemoryFallback()) {
       const diag = vmManager.getStats();
       showToast(
@@ -127,8 +151,14 @@ async function bootApp(): Promise<void> {
     bootBarFillEl.classList.remove("indeterminate");
     bootBarFillEl.style.width = "100%";
     bootBarFillEl.style.backgroundColor = "#c95646";
-    bootTitleEl.textContent = "启动失败";
+    bootTitleEl.textContent = err instanceof ResumeSessionError ? "恢复会话失败" : "启动失败";
     bootDetailEl.textContent = (err as Error)?.message ?? String(err);
+    if (err instanceof ResumeSessionError) {
+      bootActionsEl.hidden = false;
+      resumeButton.textContent = "重试恢复";
+      discardButton.hidden = false;
+      resumeButton.focus();
+    }
     console.error(err);
   }
 }

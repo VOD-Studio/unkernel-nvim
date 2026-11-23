@@ -33,6 +33,7 @@ export const CLAY_DARK_PALETTE = {
 const SLICE_MS = 16;
 const SLICE_BYTES = 262_144;
 const RESIZE_DEBOUNCE_MS = 32;
+export const SHELL_SCROLLBACK_LINES = 1_000;
 
 /** Unthrottled task boundary (MessageChannel is not throttled like setTimeout). */
 function yieldTask(): Promise<void> {
