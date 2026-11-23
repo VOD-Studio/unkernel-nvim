@@ -3,6 +3,7 @@
 // Provides local directory mounting (9p), workspace switching, session switching,
 // font sizing, disk persistence/export/import/reset, and runtime diagnostics.
 
+import { formatDiskGiB, GIB, MAX_DISK_GIB, parseDiskGiB } from "./disk-config.ts";
 import { DISTROS, isDistro } from "./distro.ts";
 import { isDirectoryPickerSupported, pickHostDirectory } from "./fs-bridge.ts";
 import {
@@ -283,9 +284,22 @@ export class ModalController {
   #renderStorage(): void {
     const panel = this.#panel("storage");
     const distro = DISTROS[this.#vmManager.activeDistro].label;
+    const { diskSize, targetDiskSize } = this.#vmManager;
     panel.innerHTML = `
       <div class="modal-section">
         <h3 class="modal-section-title">${distro} 持久化磁盘</h3>
+        <form class="row-bar" id="form-disk-size">
+          <div class="row-label-group">
+            <label class="row-label" for="input-disk-gib">数据盘容量</label>
+            <span class="row-hint" id="disk-size-hint">当前 ${formatDiskGiB(diskSize)}${diskSize < targetDiskSize ? ` · 下次启动 ${formatDiskGiB(targetDiskSize)}` : " · 按实际写入占用浏览器存储"}</span>
+          </div>
+          <div class="row-controls row-input-controls">
+            <input class="text-input" id="input-disk-gib" aria-describedby="disk-size-hint" type="number" inputmode="numeric"
+              min="${Math.ceil(diskSize / GIB)}" max="${MAX_DISK_GIB}" step="1" value="${Math.ceil(targetDiskSize / GIB)}" required />
+            <span class="row-unit">GiB</span>
+            <button class="mini-btn" id="btn-save-disk-size" type="submit">保存容量</button>
+          </div>
+        </form>
         <div class="modal-grid">
           <button class="modal-btn" id="btn-sync-disk" type="button">
             <span>立即同步落盘 (Sync)</span>
@@ -559,6 +573,20 @@ export class ModalController {
     const q = <T extends HTMLElement>(sel: string) => panel.querySelector<T>(sel)!;
     const run = (action: () => Promise<void>) => () => void this.#runDiskAction("storage", action);
 
+    q<HTMLFormElement>("#form-disk-size").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const input = q<HTMLInputElement>("#input-disk-gib");
+      const gib = parseDiskGiB(input.value);
+      if (gib === undefined || !this.#vmManager.setDiskSize(gib)) {
+        this.#toast("请输入不小于当前容量的整数 GiB");
+        input.focus();
+        return;
+      }
+      this.#renderStorage();
+      this.#renderRestart();
+      q("#btn-save-disk-size").focus();
+    });
+
     q("#btn-sync-disk").addEventListener("click", run(async () => {
       this.#toast("正在同步文件系统到 IndexedDB…");
       const ok = await this.#vmManager.syncDisk();
@@ -725,6 +753,7 @@ export class ModalController {
       this.#vmManager.hasPendingCpuChange() ? "CPU 核数" : null,
       this.#vmManager.hasPendingMemoryChange() ? "内存配额" : null,
       this.#vmManager.hasPendingNetworkChange() ? "Wisp 网络" : null,
+      this.#vmManager.hasPendingDiskSizeChange() ? "数据盘容量" : null,
     ].filter(Boolean).join("、");
     message.textContent = restarting ? "正在同步持久化磁盘…" : `${settings}将在重启后生效`;
     button.disabled = this.#diskAction !== null;
@@ -732,8 +761,8 @@ export class ModalController {
   }
 
   #updateStorageButtons(): void {
-    for (const button of this.#panel("storage").querySelectorAll("button")) {
-      button.disabled = this.#diskAction !== null;
+    for (const control of this.#panel("storage").querySelectorAll<HTMLButtonElement | HTMLInputElement>("button, input")) {
+      control.disabled = this.#diskAction !== null || !this.#vmManager.vm;
     }
   }
 

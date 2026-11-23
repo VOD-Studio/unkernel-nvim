@@ -7,10 +7,12 @@ import {
   bundledKernelUrl,
   checkSupport,
   createKernel,
+  decodeKwsparse,
   decodeSnapshot,
   download,
   encodeSnapshot,
   gzipBlob,
+  gunzipIfNeeded,
   importDataDisk,
   kwsparseHeader,
   loadKernelModule,
@@ -27,6 +29,7 @@ import {
   type PtyEnd,
 } from "unkernel";
 import { DEFAULT_DISTRO, DISTROS, isDistro, releaseGuestAssetPath, type Distro } from "./distro.ts";
+import { DEFAULT_DISK_GIB, GIB, MAX_DISK_GIB, parseDiskGiB } from "./disk-config.ts";
 import { BrowserDirectoryFs } from "./fs-bridge.ts";
 import {
   MEMORY_FALLBACK_MIB,
@@ -36,7 +39,7 @@ import {
 } from "./memory-config.ts";
 
 const DISK_VERSION = "v2"; // aarch64 + unkernel 0.2.0 distro overlay layout
-const DISK_SIZE_BYTES = 4 * 1024 * 1024 * 1024;
+const DISK_SIZE_BYTES = DEFAULT_DISK_GIB * GIB;
 const DEFAULT_SHELL = "/usr/bin/fish";
 const FALLBACK_SHELL = "/bin/sh";
 const CPU_STORAGE_KEY = "unkernel-nvim.cpus";
@@ -44,6 +47,20 @@ const DISTRO_STORAGE_KEY = "unkernel-nvim.distro";
 const MAX_CPUS = 16; // CONFIG_NR_CPUS in the upstream SMP kernel
 const SNAPSHOT_DB_NAME = "unkernel-nvim-snapshots";
 const SNAPSHOT_STORE = "snapshots";
+
+function acquireDiskLock(name: string): Promise<() => void> {
+  if (!navigator.locks) return Promise.resolve(() => {});
+  return new Promise((resolve, reject) => {
+    void navigator.locks.request(`kwdisk:${name}-${DISK_VERSION}`, { ifAvailable: true }, (lock) => {
+      if (!lock) throw new Error("此发行版的持久化磁盘正在另一个标签页使用，请关闭该标签页后刷新。");
+      return new Promise<void>((release) => resolve(release));
+    }).catch(reject);
+  });
+}
+
+function diskSizeKey(distro: Distro): string {
+  return `unkernel-nvim.diskSizeGiB.${distro}`;
+}
 
 export interface BootStatusUpdate {
   phase: "check" | "disk-check" | "disk-download" | "compile" | "boot" | "userspace" | "ready";
@@ -274,7 +291,29 @@ export class VmManager {
 
   hasPendingRestartChanges(): boolean {
     return this.hasPendingDistroChange() || this.hasPendingCpuChange() ||
-      this.hasPendingMemoryChange() || this.hasPendingNetworkChange();
+      this.hasPendingMemoryChange() || this.hasPendingNetworkChange() || this.hasPendingDiskSizeChange();
+  }
+
+  get diskSize(): number {
+    return this.vm instanceof WorkerKernel ? this.vm.disks[0]?.size ?? DISK_SIZE_BYTES : DISK_SIZE_BYTES;
+  }
+
+  get targetDiskSize(): number {
+    return Math.max(this.diskSize, this.#configuredDiskSize(this.activeDistro));
+  }
+
+  #configuredDiskSize(distro: Distro): number {
+    return (parseDiskGiB(localStorage.getItem(diskSizeKey(distro))) ?? DEFAULT_DISK_GIB) * GIB;
+  }
+
+  setDiskSize(gib: number): boolean {
+    if (!this.vm || !Number.isInteger(gib) || gib > MAX_DISK_GIB || gib * GIB < this.diskSize) return false;
+    localStorage.setItem(diskSizeKey(this.activeDistro), String(gib));
+    return true;
+  }
+
+  hasPendingDiskSizeChange(): boolean {
+    return this.vm !== null && this.targetDiskSize > this.diskSize;
   }
 
   setNetworkConfig(mode: NetMode, customUrl?: string): void {
@@ -341,6 +380,17 @@ export class VmManager {
 
   async boot(cols: number, rows: number): Promise<void> {
     const distro = this.#distro;
+    const release = await acquireDiskLock(DISTROS[distro].diskName);
+    try {
+      await this.#boot(cols, rows);
+    } catch (err) {
+      release();
+      throw err;
+    }
+  }
+
+  async #boot(cols: number, rows: number): Promise<void> {
+    const distro = this.#distro;
     const { diskName, image, label } = DISTROS[distro];
     this.#bootDistro = distro;
     const cpus = this.#cpuCount;
@@ -372,6 +422,7 @@ export class VmManager {
       version: DISK_VERSION,
       template: templateBytes,
       mode: "persistent",
+      size: this.#configuredDiskSize(distro),
     };
 
     const wispServers = this.getEffectiveWispServers();
@@ -569,7 +620,7 @@ export class VmManager {
     if (!(this.vm instanceof WorkerKernel)) {
       throw new Error("内核未运行在 Worker 模式");
     }
-    await this.syncDisk();
+    if (!(await this.syncDisk())) throw new Error("磁盘同步未完成，请重试");
     const { parts, blocks } = await this.vm.exportDisk(0);
     const blob = await gzipBlob(parts);
     const name = `unkernel-nvim-${this.activeDistro}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.kwsparse.gz`;
@@ -584,16 +635,25 @@ export class VmManager {
   }
 
   async importDiskImage(file: File): Promise<void> {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    if (this.vm instanceof WorkerKernel) {
-      await this.vm.detachDisk(0).catch(() => {});
-      await this.vm.stop().catch(() => {});
+    const bytes = await gunzipIfNeeded(await file.arrayBuffer());
+    const { size, blockSize } = decodeKwsparse(bytes);
+    if (blockSize !== 4096 || !Number.isSafeInteger(size) || size % blockSize !== 0 ||
+        size < DISK_SIZE_BYTES || size > MAX_DISK_GIB * GIB) {
+      throw new Error(`备份须为 ${DEFAULT_DISK_GIB}–${MAX_DISK_GIB} GiB 的数据盘，使用 4 KiB 磁盘块`);
     }
-    await importDataDisk(bytes, { name: DISTROS[this.activeDistro].diskName, version: DISK_VERSION, size: DISK_SIZE_BYTES });
+    const distro = this.activeDistro;
+    await this.#stopForReload();
+    await importDataDisk(bytes, { name: DISTROS[distro].diskName, version: DISK_VERSION, size });
+    localStorage.removeItem(diskSizeKey(distro));
     location.reload();
   }
 
   async syncAndReload(): Promise<void> {
+    await this.#stopForReload();
+    location.reload();
+  }
+
+  async #stopForReload(): Promise<void> {
     const vm = this.vm;
     if (vm) {
       if (!(await this.syncDisk())) throw new Error("磁盘同步未完成，请重试");
@@ -611,7 +671,6 @@ export class VmManager {
         clearTimeout(timeout);
       }
     }
-    location.reload();
   }
 
   async resetToFactoryDisk(): Promise<void> {
@@ -620,6 +679,7 @@ export class VmManager {
       await this.vm.stop().catch(() => {});
     }
     await resetDataDisk({ name: DISTROS[this.activeDistro].diskName, version: DISK_VERSION });
+    localStorage.removeItem(diskSizeKey(this.activeDistro));
     await this.clearSnapshot().catch(() => {});
     location.reload();
   }
