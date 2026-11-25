@@ -16,9 +16,11 @@ import {
   kwsparseHeader,
   loadKernelModule,
   resetDataDisk,
+  serveWasiPrograms,
   webCpuBlocker,
   WorkerKernel,
   type BootProgress,
+  type CommandsOption,
   type DiskSpec,
   type InstanceStats,
   type KernelHandle,
@@ -28,10 +30,12 @@ import {
   type Pty,
   type PtyEnd,
   type PtySize,
+  type WasiExecServer,
 } from "unkernel";
 import { DEFAULT_DISTRO, DISTROS, isDistro, releaseGuestAssetPath, type Distro } from "./distro.ts";
 import { DEFAULT_DISK_GIB, GIB, MAX_DISK_GIB, parseDiskGiB } from "./disk-config.ts";
 import { BrowserDirectoryFs } from "./fs-bridge.ts";
+import { sanitizeDropFilename } from "./host-commands.ts";
 import {
   MEMORY_FALLBACK_MIB,
   MEMORY_STORAGE_KEY,
@@ -183,6 +187,8 @@ export class VmManager {
   #onlineCpuCount: number | null = null;
   #suspending = false;
   #shellPath: string | null = null;
+  #commands?: CommandsOption;
+  #wasiServer: WasiExecServer | null = null;
   memoryConfigMiB: MemoryConfigMiB = loadStoredMemoryConfig();
   urlMemoryOverride: MemoryConfigMiB | undefined = loadUrlMemoryOverride();
   memoryRequestedMiB: number | null = null;
@@ -343,10 +349,21 @@ export class VmManager {
     onStatus: (s: BootStatusUpdate) => void;
     onSessionExit?: (mode: "nvim" | "shell", end: PtyEnd) => void;
     onNotice?: (message: string) => void;
+    commands?: CommandsOption;
   }) {
     this.#onStatus = opts.onStatus;
     this.#onSessionExit = opts.onSessionExit;
     this.#onNotice = opts.onNotice;
+    this.#commands = opts.commands;
+  }
+
+  setCommands(commands: CommandsOption): void {
+    this.#commands = commands;
+  }
+
+  #stopWasiServer(): void {
+    this.#wasiServer?.close();
+    this.#wasiServer = null;
   }
 
   async #prepareDataDisk(distro: Distro, signal: AbortSignal): Promise<Uint8Array> {
@@ -417,6 +434,7 @@ export class VmManager {
       }
       return await this.startSession(saved.mode, size, saved.cwd);
     } catch (err) {
+      this.#stopWasiServer();
       if (this.vm) await this.vm.stop().catch(() => {});
       this.vm = null;
       release();
@@ -517,6 +535,7 @@ export class VmManager {
       cpus,
       jit: true,
       vsock: true,
+      commands: this.#commands,
       ...(effectiveMemory !== null ? { memoryMiB: effectiveMemory } : {}),
       memoryFallbackMiB: [...MEMORY_FALLBACK_MIB],
       consoleSize: { cols, rows },
@@ -526,6 +545,18 @@ export class VmManager {
       log: (m) => console.debug(m),
     });
     this.vm = vm;
+    this.#stopWasiServer();
+    if (vm.vsock) {
+      try {
+        const wasi = serveWasiPrograms(vm.vsock, { log: (m) => console.debug(m) });
+        this.#wasiServer = wasi;
+        void vm.exited.then(() => {
+          if (this.#wasiServer === wasi) this.#stopWasiServer();
+        });
+      } catch (err) {
+        console.warn("[wasi] Failed to start host WASI server:", err);
+      }
+    }
     this.#bootedNetwork = network;
     this.#shellPath = null;
     void this.#resolveShell(vm);
@@ -643,6 +674,7 @@ export class VmManager {
           USER: "root",
           LOGNAME: "root",
           SHELL: shell,
+          PATH: "/run/kw/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/kw/bin",
           TERM: "xterm-256color",
           COLORTERM: "truecolor",
           LANG: "C.UTF-8",
@@ -697,6 +729,66 @@ export class VmManager {
     return entry;
   }
 
+  async readGuestFile(guestPath: string, signal?: AbortSignal): Promise<Uint8Array> {
+    if (!this.vm || this.#suspending) throw new Error("虚拟机当前无法读取文件");
+    const res = await this.vm.exec(
+      "/bin/sh",
+      [
+        "-c",
+        'if [ ! -e "$1" ]; then echo "文件不存在: $1" >&2; exit 2; fi; if [ ! -f "$1" ]; then echo "不是普通文件: $1" >&2; exit 3; fi; exec cat -- "$1"',
+        "--",
+        guestPath,
+      ],
+      { user: "root", encoding: "buffer", signal },
+    );
+    if (res.exitCode !== 0) {
+      const msg = new TextDecoder().decode(res.stderr).trim();
+      throw new Error(msg || `读取失败 (exit=${res.exitCode})`);
+    }
+    return res.stdout;
+  }
+
+  async writeGuestFiles(
+    files: readonly File[],
+    targetDir = this.currentCwd || "/workspace",
+    signal?: AbortSignal,
+  ): Promise<string[]> {
+    if (!this.vm || this.#suspending) throw new Error("虚拟机当前无法写入文件");
+    const dir = targetDir.replace(/\/+$/, "") || "/";
+    const used = new Set<string>();
+    const written: string[] = [];
+
+    for (const file of files) {
+      const base = sanitizeDropFilename(file.name);
+      let candidate = base;
+      if (used.has(candidate)) {
+        const dot = base.lastIndexOf(".");
+        const stem = dot > 0 ? base.slice(0, dot) : base;
+        const ext = dot > 0 ? base.slice(dot) : "";
+        let index = 2;
+        while (used.has(`${stem}-${index}${ext}`)) {
+          index += 1;
+        }
+        candidate = `${stem}-${index}${ext}`;
+      }
+      used.add(candidate);
+
+      const destPath = dir === "/" ? `/${candidate}` : `${dir}/${candidate}`;
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const res = await this.vm.exec(
+        "/bin/sh",
+        ["-e", "-c", 'mkdir -p -- "$1" && cat > "$2"', "--", dir, destPath],
+        { user: "root", input: bytes, signal },
+      );
+      if (res.exitCode !== 0) {
+        throw new Error(res.stderr.trim() || `写入 ${destPath} 失败 (exit=${res.exitCode})`);
+      }
+      written.push(destPath);
+    }
+
+    return written;
+  }
+
   async syncDisk(): Promise<boolean> {
     if (!this.vm || this.#suspending) return false;
     return this.vm.sync({ timeout: 5000 }).catch(() => false);
@@ -740,6 +832,7 @@ export class VmManager {
   }
 
   async #stopForReload(): Promise<void> {
+    this.#stopWasiServer();
     const vm = this.vm;
     if (vm) {
       if (!(await this.syncDisk())) throw new Error("磁盘同步未完成，请重试");
@@ -760,6 +853,7 @@ export class VmManager {
   }
 
   async resetToFactoryDisk(): Promise<void> {
+    this.#stopWasiServer();
     if (this.vm instanceof WorkerKernel) {
       await this.vm.detachDisk(0).catch(() => {});
       await this.vm.stop().catch(() => {});
@@ -807,6 +901,7 @@ export class VmManager {
           }
         },
       });
+      this.#stopWasiServer();
       this.activePty = null;
       this.vm = null;
       this.#onStatus({
@@ -842,6 +937,12 @@ export class VmManager {
     crossOriginIsolated: boolean;
     stats: InstanceStats | null;
     diskBlocks: number;
+    wasi: {
+      active: boolean;
+      shared: boolean;
+      runs: number;
+      cachedModules: number;
+    };
   } {
     const stats = this.vm ? this.vm.stats() : null;
     let diskBlocks = 0;
@@ -849,6 +950,7 @@ export class VmManager {
       diskBlocks = this.vm.disks[0].overlayBlocks ?? 0;
     }
     const memoryMiB = this.vm?.memoryMiB ?? 0;
+    const wasiStats = this.#wasiServer?.stats;
     return {
       transport: this.vm?.transport ?? "unknown",
       cpus: this.#onlineCpuCount ?? stats?.cpus ?? null,
@@ -859,6 +961,12 @@ export class VmManager {
       crossOriginIsolated: globalThis.crossOriginIsolated === true,
       stats,
       diskBlocks,
+      wasi: {
+        active: this.#wasiServer !== null,
+        shared: this.#wasiServer?.shared ?? false,
+        runs: wasiStats?.started ?? 0,
+        cachedModules: wasiStats?.cached ?? 0,
+      },
     };
   }
 }

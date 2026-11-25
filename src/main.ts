@@ -3,7 +3,14 @@
 // WorkerKernel VM manager, boot progress overlay, and modal control center.
 
 import { DISTROS } from "./distro.ts";
+import { pickHostDirectory } from "./fs-bridge.ts";
 import { GuestPreview } from "./guest-preview.ts";
+import {
+  createBrowserFilePicker,
+  createHostCommands,
+  shellQuoteArg,
+  triggerBrowserDownload,
+} from "./host-commands.ts";
 import { ModalController } from "./modal.ts";
 import { ResumeSessionError } from "./suspended-session.ts";
 import { CanvasTerminal, SHELL_SCROLLBACK_LINES } from "./terminal.ts";
@@ -89,6 +96,27 @@ const terminal = new CanvasTerminal({
   onFirstOutput: () => {
     hideBootOverlay();
   },
+  onDropFiles: async (files) => {
+    if (!vmManager.vm) {
+      showToast("虚拟机尚未就绪");
+      return;
+    }
+    const targetDir = vmManager.currentCwd || "/workspace";
+    try {
+      const paths = await vmManager.writeGuestFiles(files, targetDir);
+      showToast(
+        paths.length === 1
+          ? `已导入 ${paths[0]}`
+          : `已导入 ${paths.length} 个文件到 ${targetDir}`,
+      );
+      if (vmManager.currentMode === "shell") {
+        terminal.sendText(`${paths.map(shellQuoteArg).join(" ")} `);
+      }
+      terminal.focus();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), 5000);
+    }
+  },
 });
 
 const vmManager = new VmManager({
@@ -106,6 +134,40 @@ const vmManager = new VmManager({
 });
 
 const preview = new GuestPreview(() => vmManager.vm, () => terminal.focus());
+
+vmManager.setCommands(
+  createHostCommands({
+    readClipboard: async () => {
+      if (!navigator.clipboard?.readText) {
+        throw new Error("当前浏览器环境不支持读取剪贴板");
+      }
+      return navigator.clipboard.readText();
+    },
+    writeClipboard: async (text) => {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("当前浏览器环境不支持写入剪贴板");
+      }
+      await navigator.clipboard.writeText(text);
+    },
+    openPreview: () => preview.open(),
+    closePreview: () => preview.close(),
+    navigatePreview: (port, path) => preview.openAt(port, path),
+    openUrl: (url) => Boolean(window.open(url, "_blank", "noopener,noreferrer")),
+    readGuestFile: (guestPath, signal) => vmManager.readGuestFile(guestPath, signal),
+    writeGuestFiles: (files, targetDir, signal) => vmManager.writeGuestFiles(files, targetDir, signal),
+    triggerDownload: triggerBrowserDownload,
+    pickUploadFiles: createBrowserFilePicker,
+    mountDirectory: async () => {
+      const dirFs = await pickHostDirectory();
+      const entry = await vmManager.mountHostDirectory(dirFs);
+      if (modal?.isOpen) modal.render();
+      showToast(`已挂载本地目录至 ${entry.guestPath}`);
+      return entry.guestPath;
+    },
+    listMounts: () => [...vmManager.mountedFolders.keys()],
+    notify: showToast,
+  }),
+);
 
 resumeButton.addEventListener("click", () => location.reload());
 discardButton.addEventListener("click", async () => {

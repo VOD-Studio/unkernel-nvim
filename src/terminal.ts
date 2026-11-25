@@ -52,6 +52,7 @@ export interface CanvasTerminalOptions {
   fontSize?: number;
   onToggleMenu?: () => void;
   onFirstOutput?: () => void;
+  onDropFiles?: (files: File[]) => void | Promise<void>;
 }
 
 export class CanvasTerminal {
@@ -66,12 +67,15 @@ export class CanvasTerminal {
   #resizeTimer: ReturnType<typeof setTimeout> | undefined;
   #onToggleMenu?: () => void;
   #onFirstOutput?: () => void;
+  #onDropFiles?: (files: File[]) => void | Promise<void>;
   #sawFirstOutput = false;
+  #dragDepth = 0;
 
   constructor(opts: CanvasTerminalOptions) {
     this.#container = opts.container;
     this.#onToggleMenu = opts.onToggleMenu;
     this.#onFirstOutput = opts.onFirstOutput;
+    this.#onDropFiles = opts.onDropFiles;
 
     const savedFontSize = Number(localStorage.getItem("unkernel-nvim.fontSize")) || opts.fontSize || 15;
 
@@ -169,6 +173,47 @@ export class CanvasTerminal {
       this.#resizeTimer = setTimeout(() => {
         this.fit();
       }, RESIZE_DEBOUNCE_MS);
+    });
+
+    this.#bindFileDrop();
+  }
+
+  #bindFileDrop(): void {
+    const hasFiles = (ev: DragEvent): boolean =>
+      Boolean(ev.dataTransfer?.types && Array.from(ev.dataTransfer.types).includes("Files"));
+
+    this.#container.addEventListener("dragenter", (ev) => {
+      if (!hasFiles(ev)) return;
+      ev.preventDefault();
+      this.#dragDepth += 1;
+      this.#container.classList.add("drop-active");
+    });
+
+    this.#container.addEventListener("dragover", (ev) => {
+      if (!hasFiles(ev)) return;
+      ev.preventDefault();
+      if (ev.dataTransfer) {
+        ev.dataTransfer.dropEffect = "copy";
+      }
+    });
+
+    this.#container.addEventListener("dragleave", (ev) => {
+      if (!hasFiles(ev) && this.#dragDepth === 0) return;
+      this.#dragDepth = Math.max(0, this.#dragDepth - 1);
+      if (this.#dragDepth === 0) {
+        this.#container.classList.remove("drop-active");
+      }
+    });
+
+    this.#container.addEventListener("drop", (ev) => {
+      if (!hasFiles(ev)) return;
+      ev.preventDefault();
+      this.#dragDepth = 0;
+      this.#container.classList.remove("drop-active");
+      const files = Array.from(ev.dataTransfer?.files ?? []);
+      if (files.length > 0) {
+        void this.#onDropFiles?.(files);
+      }
     });
   }
 

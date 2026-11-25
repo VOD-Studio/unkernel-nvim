@@ -65,6 +65,14 @@ export class GuestPreview {
     this.#port.select();
   }
 
+  openAt(port: number, path = "/"): void {
+    this.#port.value = String(port);
+    this.#path.value = path || "/";
+    this.#panel.hidden = false;
+    document.body.classList.add("preview-open");
+    void this.#navigate();
+  }
+
   close(): void {
     this.#disconnect();
     this.#panel.hidden = true;
