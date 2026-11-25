@@ -336,8 +336,18 @@ export class ModalController {
   #renderStorage(): void {
     const panel = this.#panel("storage");
     const distro = DISTROS[this.#vmManager.activeDistro].label;
-    const { diskSize, targetDiskSize, isSnapshotMode, diskNotice } = this.#vmManager;
+    const { diskSize, targetDiskSize, isSnapshotMode, diskNotice, lastDiskError } = this.#vmManager;
     panel.innerHTML = `
+      ${
+        lastDiskError
+          ? `<div class="row-bar modal-danger" role="alert">
+              <div class="row-label-group">
+                <span class="row-label">磁盘持久化警告${lastDiskError.isQuota ? "（存储配额已满）" : ""}</span>
+                <span class="row-hint">${escapeHtml(lastDiskError.message)}</span>
+              </div>
+            </div>`
+          : ""
+      }
       ${
         isSnapshotMode
           ? `<div class="row-bar modal-notice" role="status">
@@ -686,6 +696,7 @@ export class ModalController {
       const { diskBlocks } = this.#vmManager.getStats();
       this.#panel("system").querySelector("#stat-disk-size")!.textContent = `${((diskBlocks * 4096) / 1048576).toFixed(1)} MiB`;
       this.#panel("system").querySelector("#stat-disk-blocks")!.textContent = `${diskBlocks} 块`;
+      this.#renderStorage();
     }));
 
     q("#btn-export-disk").addEventListener("click", run(async () => {

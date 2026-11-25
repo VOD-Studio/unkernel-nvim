@@ -15,12 +15,18 @@ import {
   importDataDisk,
   kwsparseHeader,
   loadKernelModule,
+  openDataDisk,
+  openDistroDisk,
   resetDataDisk,
   serveWasiPrograms,
+  snapshotCpuMismatch,
+  snapshotDeviceMismatch,
+  snapshotDiskMismatch,
   webCpuBlocker,
   WorkerKernel,
   type BootProgress,
   type CommandsOption,
+  type DeviceKind,
   type DiskSpec,
   type InstanceStats,
   type KernelHandle,
@@ -43,6 +49,12 @@ import {
   SNAPSHOT_LIMIT_BYTES,
   type DiskMode,
 } from "./disk-config.ts";
+import {
+  formatDiskError,
+  formatSnapshotMismatch,
+  parseMacAddress,
+  type DiskErrorInfo,
+} from "./disk-diagnostics.ts";
 import { BrowserDirectoryFs } from "./fs-bridge.ts";
 import { sanitizeDropFilename } from "./host-commands.ts";
 import {
@@ -250,6 +262,8 @@ export class VmManager {
   memoryFallbackReasons: string[] = [];
   seededFromCache = false;
   diskMode: DiskMode = "persistent";
+  #lastDiskError: DiskErrorInfo | null = null;
+  #lastDiskErrorToastAt = 0;
 
   get isSnapshotMode(): boolean {
     return this.diskMode === "snapshot";
@@ -257,6 +271,10 @@ export class VmManager {
 
   get diskNotice(): string | null {
     return this.vm instanceof WorkerKernel ? this.vm.disks[0]?.notice ?? null : null;
+  }
+
+  get lastDiskError(): DiskErrorInfo | null {
+    return this.#lastDiskError;
   }
 
   get sessions(): readonly TerminalSession[] {
@@ -433,13 +451,13 @@ export class VmManager {
   #onStatus: (s: BootStatusUpdate) => void;
   #onSessionExit?: (session: TerminalSession, end: PtyEnd) => void;
   #onSessionsChange?: () => void;
-  #onNotice?: (message: string) => void;
+  #onNotice?: (message: string, durationMs?: number) => void;
 
   constructor(opts: {
     onStatus: (s: BootStatusUpdate) => void;
     onSessionExit?: (session: TerminalSession, end: PtyEnd) => void;
     onSessionsChange?: () => void;
-    onNotice?: (message: string) => void;
+    onNotice?: (message: string, durationMs?: number) => void;
     commands?: CommandsOption;
   }) {
     this.#onStatus = opts.onStatus;
@@ -447,6 +465,51 @@ export class VmManager {
     this.#onSessionsChange = opts.onSessionsChange;
     this.#onNotice = opts.onNotice;
     this.#commands = opts.commands;
+  }
+
+  #handleDiskError(error: unknown): void {
+    const info = formatDiskError(error);
+    const prevMessage = this.#lastDiskError?.message;
+    this.#lastDiskError = info;
+    console.error("[disk] Persistence error:", error);
+
+    const now = Date.now();
+    if (info.message !== prevMessage || now - this.#lastDiskErrorToastAt >= 5000) {
+      this.#lastDiskErrorToastAt = now;
+      this.#onNotice?.(info.message, 8000);
+    }
+  }
+
+  async #validateSnapshotDisks(
+    snapshot: KernelSnapshot,
+    distro: Distro,
+    templateBytes: Uint8Array,
+  ): Promise<void> {
+    const { diskName, image } = DISTROS[distro];
+    let distroDisk: Awaited<ReturnType<typeof openDistroDisk>> | null = null;
+    let dataDisk: Awaited<ReturnType<typeof openDataDisk>> | null = null;
+    try {
+      distroDisk = await openDistroDisk(getGuestAssetUrl(image), { prefetch: false });
+      dataDisk = await openDataDisk({
+        name: diskName,
+        version: DISK_VERSION,
+        template: templateBytes,
+        mode: "persistent",
+      });
+      const mismatch = snapshotDiskMismatch(snapshot.disks, [distroDisk, dataDisk]);
+      if (mismatch) {
+        throw new Error(formatSnapshotMismatch("disk", mismatch));
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("无法恢复")) {
+        throw err;
+      }
+      const raw = err instanceof Error ? err.message : String(err);
+      throw new Error(formatSnapshotMismatch("disk", raw), { cause: err });
+    } finally {
+      await dataDisk?.store?.close?.().catch(() => {});
+      distroDisk?.close();
+    }
   }
 
   setCommands(commands: CommandsOption): void {
@@ -604,6 +667,45 @@ export class VmManager {
     if (cpus > this.cpuLimit) throw new Error(`该会话需要 ${cpus} 个 CPU 核，当前浏览器支持 ${this.cpuLimit} 核`);
     this.#bootCpuCount = cpus;
     this.#onlineCpuCount = null;
+    this.#lastDiskError = null;
+
+    const netSpec: NetSpec | undefined =
+      (restore ? restore.devices.network : network.servers.length > 0)
+        ? {
+            kind: "net",
+            backend: {
+              kind: "wisp",
+              servers: network.servers,
+            },
+            mac: restore?.devices.network?.mac.map((byte) => byte.toString(16).padStart(2, "0")).join(":"),
+            optional: true,
+          }
+        : undefined;
+
+    const presentDevices: Record<DeviceKind, boolean> = {
+      display: false,
+      sound: false,
+      vsock: true,
+      shm: false,
+      network: Boolean(netSpec),
+      gpu: false,
+    };
+
+    if (restore) {
+      const cpuMismatch = snapshotCpuMismatch(restore, cpus);
+      if (cpuMismatch) {
+        throw new Error(formatSnapshotMismatch("cpu", cpuMismatch));
+      }
+      const deviceMismatch = snapshotDeviceMismatch(
+        restore.devices,
+        presentDevices,
+        parseMacAddress(netSpec?.mac),
+      );
+      if (deviceMismatch) {
+        throw new Error(formatSnapshotMismatch("device", deviceMismatch));
+      }
+    }
+
     this.#onStatus({ phase: "check", title: "检查浏览器 WebAssembly / JSPI 环境…" });
     const support = await checkSupport();
     if (!support.ok) {
@@ -624,6 +726,11 @@ export class VmManager {
       throw err;
     }
 
+    if (restore) {
+      this.#onStatus({ phase: "boot", title: "正在校验挂起快照与磁盘一致性…" });
+      await this.#validateSnapshotDisks(restore, distro, templateBytes);
+    }
+
     const diskSpec: DiskSpec = {
       kind: "data",
       name: diskName,
@@ -633,19 +740,6 @@ export class VmManager {
       ...(diskMode === "snapshot" ? { snapshotLimit: SNAPSHOT_LIMIT_BYTES } : {}),
       size: restore || diskMode === "snapshot" ? undefined : this.#configuredDiskSize(distro),
     };
-
-    const netSpec: NetSpec | undefined =
-      (restore ? restore.devices.network : network.servers.length > 0)
-        ? {
-            kind: "net",
-            backend: {
-              kind: "wisp",
-              servers: network.servers,
-            },
-            mac: restore?.devices.network?.mac.map((byte) => byte.toString(16).padStart(2, "0")).join(":"),
-            optional: true,
-          }
-        : undefined;
 
     const onProgress = (p: BootProgress) => {
       if (p.stage === "memory") {
@@ -695,6 +789,7 @@ export class VmManager {
       consoleSize: { cols, rows },
       disks: [diskSpec],
       net: netSpec,
+      onDiskError: (_index, error) => this.#handleDiskError(error),
       onProgress,
       log: (m) => console.debug(m),
     });
@@ -1100,7 +1195,9 @@ export class VmManager {
   async syncDisk(): Promise<boolean> {
     if (this.isSnapshotMode) return true;
     if (!this.vm || this.#suspending) return false;
-    return this.vm.sync({ timeout: 5000 }).catch(() => false);
+    const ok = await this.vm.sync({ timeout: 5000 }).catch(() => false);
+    if (ok) this.#lastDiskError = null;
+    return ok;
   }
 
   async exportDiskImage(): Promise<{ name: string; bytes: number; blocks: number }> {
