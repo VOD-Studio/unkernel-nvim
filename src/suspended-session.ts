@@ -2,6 +2,7 @@
 
 import { encodeSnapshot, type KernelSnapshot } from "unkernel";
 import type { Distro } from "./distro.ts";
+import type { SuspendedTerminalEntry } from "./terminal-sessions.ts";
 import type { NetMode } from "./vm-manager.ts";
 
 const DB_NAME = "unkernel-nvim-snapshots";
@@ -13,6 +14,8 @@ export interface SessionMetadata {
   cwd: string;
   shell: string;
   terminalId?: string;
+  activeSessionId?: string;
+  sessions?: SuspendedTerminalEntry[];
   network: { mode: NetMode; servers: string[] };
 }
 

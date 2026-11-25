@@ -14,7 +14,8 @@ import {
 import { ModalController } from "./modal.ts";
 import { ResumeSessionError } from "./suspended-session.ts";
 import { CanvasTerminal, SHELL_SCROLLBACK_LINES } from "./terminal.ts";
-import { VmManager, type BootStatusUpdate } from "./vm-manager.ts";
+import { cycleSessionId, MAX_TERMINAL_SESSIONS, type SessionMode } from "./terminal-sessions.ts";
+import { VmManager, type BootStatusUpdate, type TerminalSession } from "./vm-manager.ts";
 
 const stageEl = document.getElementById("terminal-stage")!;
 const bootOverlayEl = document.getElementById("boot-overlay")!;
@@ -25,6 +26,7 @@ const bootBadgeEl = document.getElementById("boot-mode-badge")!;
 const bootActionsEl = document.getElementById("boot-actions")!;
 const resumeButton = document.querySelector<HTMLButtonElement>("#btn-resume-session")!;
 const discardButton = document.querySelector<HTMLButtonElement>("#btn-discard-session")!;
+const sessionTabsEl = document.getElementById("session-tabs")!;
 const pillBtn = document.getElementById("menu-pill") as HTMLButtonElement;
 const pillLabelEl = document.getElementById("pill-label")!;
 const pillKbdEl = document.getElementById("pill-kbd")!;
@@ -77,6 +79,8 @@ function updateBootOverlay(s: BootStatusUpdate): void {
   if (s.phase === "suspended") {
     modal?.close();
     preview.close();
+    terminal.unmountAll();
+    renderSessionHud();
     bootOverlayEl.classList.remove("fade-out");
     bootBarFillEl.classList.remove("indeterminate");
     bootBarFillEl.style.width = "100%";
@@ -89,10 +93,132 @@ function updateBootOverlay(s: BootStatusUpdate): void {
 }
 
 let modal: ModalController | null = null;
+let togglingQuickSession = false;
+
+function renderSessionHud(): void {
+  const active = vmManager.activeSession;
+  if (!active) {
+    pillLabelEl.textContent = "空闲";
+  } else {
+    pillLabelEl.textContent = active.exited ? `${active.title} (exited)` : active.title;
+  }
+
+  sessionTabsEl.replaceChildren();
+  const sessions = vmManager.sessions;
+  if (sessions.length === 0) return;
+
+  for (const session of sessions) {
+    const isActive = session.id === vmManager.activeSessionId;
+    const tab = document.createElement("div");
+    tab.className = `session-tab${isActive ? " active" : ""}${session.exited ? " exited" : ""}`;
+
+    const btn = document.createElement("button");
+    btn.className = "session-tab-btn";
+    btn.type = "button";
+    btn.role = "tab";
+    btn.setAttribute("aria-selected", String(isActive));
+    btn.title = `${session.title} · ${session.cwd}`;
+    btn.textContent = session.exited ? `${session.title} (已结束)` : session.title;
+    btn.addEventListener("click", () => switchToSession(session.id));
+
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "session-tab-close";
+    closeBtn.type = "button";
+    closeBtn.title = `关闭 ${session.title}`;
+    closeBtn.setAttribute("aria-label", `关闭 ${session.title}`);
+    closeBtn.textContent = "×";
+    closeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void closeSessionTab(session.id);
+    });
+
+    tab.append(btn, closeBtn);
+    sessionTabsEl.appendChild(tab);
+  }
+
+  const addBtn = document.createElement("button");
+  addBtn.className = "session-tab-add";
+  addBtn.type = "button";
+  addBtn.title = "新建 Shell 标签";
+  addBtn.setAttribute("aria-label", "新建 Shell 标签");
+  addBtn.textContent = "+";
+  addBtn.disabled = sessions.length >= MAX_TERMINAL_SESSIONS;
+  addBtn.addEventListener("click", () => {
+    void openNewSession("shell").catch((err) => {
+      showToast(err instanceof Error ? err.message : String(err));
+    });
+  });
+  sessionTabsEl.appendChild(addBtn);
+}
+
+function mountSession(session: TerminalSession, activate: boolean): void {
+  if (!session.pty) return;
+  terminal.mountSession(
+    session.id,
+    session.pty,
+    session.mode === "shell" ? SHELL_SCROLLBACK_LINES : 0,
+    { activate },
+  );
+}
+
+function switchToSession(id: string): void {
+  const session = vmManager.switchSession(id);
+  if (!session) return;
+  terminal.activateSession(session.id, !modal?.isOpen);
+  renderSessionHud();
+  if (modal?.isOpen) modal.render();
+}
+
+async function openNewSession(
+  mode: SessionMode,
+  opts?: { cwd?: string; replaceActive?: boolean },
+): Promise<void> {
+  const replaceSessionId = opts?.replaceActive ? (vmManager.activeSessionId ?? undefined) : undefined;
+  const session = await vmManager.openSession(mode, terminal.getSize(), opts?.cwd, {
+    replaceSessionId,
+  });
+  mountSession(session, true);
+  renderSessionHud();
+  if (!modal?.isOpen) terminal.focus();
+}
+
+async function closeSessionTab(id: string): Promise<void> {
+  const res = await vmManager.closeSession(id);
+  if (!res) return;
+  terminal.unmountSession(id);
+  if (res.nextActive) {
+    terminal.activateSession(res.nextActive.id, !modal?.isOpen);
+  }
+  renderSessionHud();
+  if (modal?.isOpen) modal.render();
+}
 
 const terminal = new CanvasTerminal({
   container: stageEl,
   onToggleMenu: () => modal?.toggle(),
+  onCycleSession: (delta) => {
+    const nextId = cycleSessionId(vmManager.sessions, vmManager.activeSessionId, delta);
+    if (nextId && nextId !== vmManager.activeSessionId) {
+      switchToSession(nextId);
+    }
+  },
+  onQuickToggleSession: () => {
+    if (togglingQuickSession || !vmManager.vm) return;
+    const targetMode: SessionMode = vmManager.currentMode === "nvim" ? "shell" : "nvim";
+    const existing = vmManager.sessions.find((s) => s.mode === targetMode && !s.exited);
+    if (existing) {
+      switchToSession(existing.id);
+      return;
+    }
+    togglingQuickSession = true;
+    void openNewSession(targetMode)
+      .catch((err) => {
+        showToast(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        togglingQuickSession = false;
+      });
+  },
   onFirstOutput: () => {
     hideBootOverlay();
   },
@@ -122,14 +248,21 @@ const terminal = new CanvasTerminal({
 const vmManager = new VmManager({
   onStatus: updateBootOverlay,
   onNotice: showToast,
-  onSessionExit: (mode) => {
-    pillLabelEl.textContent = `${mode} (exited)`;
-    modal?.open("workspace");
+  onSessionsChange: () => {
+    renderSessionHud();
+    if (modal?.isOpen) modal.render();
+  },
+  onSessionExit: (session) => {
+    renderSessionHud();
+    if (modal?.isOpen) modal.render();
     showToast(
-      mode === "nvim"
-        ? "Neovim 已退出"
-        : "Shell 会话已结束",
+      session.mode === "nvim"
+        ? `${session.title} 已退出`
+        : `${session.title} 会话已结束`,
     );
+    if (vmManager.activeSessionId === session.id && vmManager.sessions.length === 1) {
+      modal?.open("workspace");
+    }
   },
 });
 
@@ -188,10 +321,10 @@ modal = new ModalController({
   vmManager,
   terminal,
   onOpenPreview: () => preview.open(),
+  onOpenSession: openNewSession,
+  onSelectSession: switchToSession,
+  onCloseSession: closeSessionTab,
   toast: showToast,
-  onSessionChange: (mode) => {
-    pillLabelEl.textContent = mode === "nvim" ? "nvim" : vmManager.shellName;
-  },
 });
 
 async function bootApp(): Promise<void> {
@@ -203,10 +336,17 @@ async function bootApp(): Promise<void> {
 
     const size = terminal.getSize();
     const restored = await vmManager.boot(size.cols, size.rows, size);
-    const pty = restored ?? await vmManager.startSession("nvim", terminal.getSize(), "/workspace");
-    const shell = vmManager.currentMode === "shell";
-    pillLabelEl.textContent = shell ? vmManager.shellName : "nvim";
-    terminal.attachPty(pty, shell ? SHELL_SCROLLBACK_LINES : 0);
+    if (restored.length > 0) {
+      for (const session of restored) {
+        mountSession(session, session.id === vmManager.activeSessionId);
+      }
+      if (vmManager.activeSessionId) {
+        terminal.activateSession(vmManager.activeSessionId, true);
+      }
+      renderSessionHud();
+    } else {
+      await openNewSession("nvim", { cwd: "/workspace" });
+    }
     if (vmManager.didMemoryFallback()) {
       const diag = vmManager.getStats();
       showToast(

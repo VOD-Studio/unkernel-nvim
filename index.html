@@ -50,19 +50,22 @@
       </div>
     </div>
 
-    <!-- Floating control center trigger -->
-    <button
-      id="menu-pill"
-      class="menu-pill"
-      type="button"
-      title="打开控制中心 (Ctrl+Shift+P / ⌘+Shift+P)"
-      aria-haspopup="dialog"
-      aria-controls="modal-backdrop"
-    >
-      <span class="pill-dot" id="pill-dot"></span>
-      <span class="pill-label" id="pill-label">nvim</span>
-      <kbd class="pill-kbd" id="pill-kbd">⌘⇧P</kbd>
-    </button>
+    <!-- Floating control center trigger & session tabs -->
+    <div class="floating-hud" id="floating-hud">
+      <div class="session-tabs" id="session-tabs" role="tablist" aria-label="终端会话"></div>
+      <button
+        id="menu-pill"
+        class="menu-pill"
+        type="button"
+        title="打开控制中心 (Ctrl+Shift+P / ⌘+Shift+P)"
+        aria-haspopup="dialog"
+        aria-controls="modal-backdrop"
+      >
+        <span class="pill-dot" id="pill-dot"></span>
+        <span class="pill-label" id="pill-label">nvim</span>
+        <kbd class="pill-kbd" id="pill-kbd">⌘⇧P</kbd>
+      </button>
+    </div>
 
     <!-- Modal Control Center (hidden by default) -->
     <div id="modal-backdrop" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">

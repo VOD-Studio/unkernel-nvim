@@ -51,21 +51,36 @@ export interface CanvasTerminalOptions {
   container: HTMLElement;
   fontSize?: number;
   onToggleMenu?: () => void;
+  onCycleSession?: (delta: 1 | -1) => void;
+  onQuickToggleSession?: () => void;
   onFirstOutput?: () => void;
   onDropFiles?: (files: File[]) => void | Promise<void>;
 }
 
+interface TerminalPane {
+  id: string;
+  el: HTMLDivElement;
+  term: Terminal;
+  fitAddon: FitAddon;
+  webgl: WebglAddon | null;
+  pty: Pty | null;
+  pumpAbort: AbortController | null;
+  scrollback: number;
+}
+
 export class CanvasTerminal {
-  readonly term: Terminal;
-  readonly fitAddon: FitAddon;
   webglActive = false;
 
   #container: HTMLElement;
-  #pty: Pty | null = null;
-  #pumpAbort: AbortController | null = null;
+  #panes = new Map<string, TerminalPane>();
+  #activeId: string | null = null;
+  #unclaimedId: string | null = null;
+  #fontSize: number;
   #encoder = new TextEncoder();
   #resizeTimer: ReturnType<typeof setTimeout> | undefined;
   #onToggleMenu?: () => void;
+  #onCycleSession?: (delta: 1 | -1) => void;
+  #onQuickToggleSession?: () => void;
   #onFirstOutput?: () => void;
   #onDropFiles?: (files: File[]) => void | Promise<void>;
   #sawFirstOutput = false;
@@ -74,20 +89,66 @@ export class CanvasTerminal {
   constructor(opts: CanvasTerminalOptions) {
     this.#container = opts.container;
     this.#onToggleMenu = opts.onToggleMenu;
+    this.#onCycleSession = opts.onCycleSession;
+    this.#onQuickToggleSession = opts.onQuickToggleSession;
     this.#onFirstOutput = opts.onFirstOutput;
     this.#onDropFiles = opts.onDropFiles;
+    this.#fontSize = Number(localStorage.getItem("unkernel-nvim.fontSize")) || opts.fontSize || 15;
 
-    const savedFontSize = Number(localStorage.getItem("unkernel-nvim.fontSize")) || opts.fontSize || 15;
+    const initialId = "__initial__";
+    const initialPane = this.#createPane(initialId, 0, true);
+    this.#panes.set(initialId, initialPane);
+    this.#activeId = initialId;
+    this.#unclaimedId = initialId;
 
-    this.term = new Terminal({
+    // Observe container resize with 32ms debounce to avoid flooding guest with SIGWINCH
+    const ro = new ResizeObserver(() => {
+      clearTimeout(this.#resizeTimer);
+      this.#resizeTimer = setTimeout(() => {
+        this.fit();
+      }, RESIZE_DEBOUNCE_MS);
+    });
+    ro.observe(this.#container);
+    window.addEventListener("resize", () => {
+      clearTimeout(this.#resizeTimer);
+      this.#resizeTimer = setTimeout(() => {
+        this.fit();
+      }, RESIZE_DEBOUNCE_MS);
+    });
+
+    this.#bindFileDrop();
+  }
+
+  get #activePane(): TerminalPane | null {
+    if (this.#activeId) {
+      return this.#panes.get(this.#activeId) ?? null;
+    }
+    return null;
+  }
+
+  get term(): Terminal {
+    const active = this.#activePane;
+    if (active) return active.term;
+    const first = this.#panes.values().next().value;
+    if (!first) throw new Error("No terminal pane mounted");
+    return first.term;
+  }
+
+  #createPane(id: string, scrollback: number, active: boolean): TerminalPane {
+    const el = document.createElement("div");
+    el.className = active ? "terminal-pane active" : "terminal-pane";
+    el.dataset.sessionId = id;
+    this.#container.appendChild(el);
+
+    const term = new Terminal({
       allowProposedApi: true,
       customGlyphs: true,
       rescaleOverlappingGlyphs: true,
       cursorBlink: false,
       cursorStyle: "block",
-      scrollback: 0,
+      scrollback,
       macOptionIsMeta: true,
-      fontSize: savedFontSize,
+      fontSize: this.#fontSize,
       lineHeight: 1.18,
       fontFamily:
         '"Maple Mono Normal NF CN", "Maple Mono NF", "JetBrainsMono Nerd Font", "Symbols Nerd Font Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
@@ -120,19 +181,19 @@ export class CanvasTerminal {
       },
     });
 
-    this.fitAddon = new FitAddon();
+    const fitAddon = new FitAddon();
     const unicode11Addon = new Unicode11Addon();
     const clipboardAddon = new ClipboardAddon();
 
-    this.term.loadAddon(this.fitAddon);
-    this.term.loadAddon(unicode11Addon);
-    this.term.loadAddon(clipboardAddon);
-    this.term.unicode.activeVersion = "11";
+    term.loadAddon(fitAddon);
+    term.loadAddon(unicode11Addon);
+    term.loadAddon(clipboardAddon);
+    term.unicode.activeVersion = "11";
 
-    // Intercept Ctrl+Shift+P / Cmd+Shift+P to toggle the host control modal
-    this.term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
+    // Intercept host shortcuts before guest PTY receives them
+    term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
+      if (ev.type !== "keydown") return true;
       if (
-        ev.type === "keydown" &&
         (ev.key === "P" || ev.key === "p") &&
         ev.shiftKey &&
         (ev.ctrlKey || ev.metaKey)
@@ -141,41 +202,58 @@ export class CanvasTerminal {
         this.#onToggleMenu?.();
         return false;
       }
+      if (ev.ctrlKey && ev.shiftKey && !ev.metaKey && !ev.altKey) {
+        if (ev.key === "ArrowLeft") {
+          ev.preventDefault();
+          this.#onCycleSession?.(-1);
+          return false;
+        }
+        if (ev.key === "ArrowRight") {
+          ev.preventDefault();
+          this.#onCycleSession?.(1);
+          return false;
+        }
+        if (ev.code === "Backslash") {
+          ev.preventDefault();
+          this.#onQuickToggleSession?.();
+          return false;
+        }
+      }
       return true;
     });
 
-    this.term.open(this.#container);
-    this.#enableWebgl();
-    this.fit();
+    const pane: TerminalPane = {
+      id,
+      el,
+      term,
+      fitAddon,
+      webgl: null,
+      pty: null,
+      pumpAbort: null,
+      scrollback,
+    };
 
-    // Forward user keystrokes and binary mouse/paste sequences to the active PTY
-    this.term.onData((data) => {
-      this.#pty?.write(data).catch(() => {});
+    term.open(el);
+    if (active) {
+      this.#attachWebgl(pane);
+    }
+    try {
+      fitAddon.fit();
+    } catch {}
+
+    // Forward user keystrokes and binary mouse/paste sequences to the pane's PTY
+    term.onData((data) => {
+      pane.pty?.write(data).catch(() => {});
     });
-    this.term.onBinary((bin) => {
+    term.onBinary((bin) => {
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) {
         bytes[i] = bin.charCodeAt(i) & 0xff;
       }
-      this.#pty?.write(bytes).catch(() => {});
+      pane.pty?.write(bytes).catch(() => {});
     });
 
-    // Observe container resize with 32ms debounce to avoid flooding guest with SIGWINCH
-    const ro = new ResizeObserver(() => {
-      clearTimeout(this.#resizeTimer);
-      this.#resizeTimer = setTimeout(() => {
-        this.fit();
-      }, RESIZE_DEBOUNCE_MS);
-    });
-    ro.observe(this.#container);
-    window.addEventListener("resize", () => {
-      clearTimeout(this.#resizeTimer);
-      this.#resizeTimer = setTimeout(() => {
-        this.fit();
-      }, RESIZE_DEBOUNCE_MS);
-    });
-
-    this.#bindFileDrop();
+    return pane;
   }
 
   #bindFileDrop(): void {
@@ -217,15 +295,34 @@ export class CanvasTerminal {
     });
   }
 
-  #enableWebgl(): void {
+  #detachWebgl(pane: TerminalPane): void {
+    if (!pane.webgl) return;
+    try {
+      pane.webgl.dispose();
+    } catch {}
+    pane.webgl = null;
+    if (this.#activeId === pane.id) {
+      this.webglActive = false;
+    }
+  }
+
+  #attachWebgl(pane: TerminalPane): void {
+    if (pane.webgl) return;
     try {
       const webgl = new WebglAddon();
       webgl.onContextLoss(() => {
-        webgl.dispose();
-        this.webglActive = false;
-        this.#enableWebgl();
+        if (pane.webgl === webgl) {
+          pane.webgl = null;
+        }
+        try {
+          webgl.dispose();
+        } catch {}
+        if (this.#activeId === pane.id) {
+          this.webglActive = false;
+          this.#attachWebgl(pane);
+        }
       });
-      this.term.loadAddon(webgl);
+      pane.term.loadAddon(webgl);
       // Fix @xterm/addon-webgl initialization order & ResizeObserver canvas/gl.viewport desync on HiDPI:
       // 1) _initializeWebGLState calls handleResize before _glyphRenderer.value is assigned;
       // 2) _observerDisposable mutates canvas.width/height without updating gl.viewport or u_resolution.
@@ -238,64 +335,161 @@ export class CanvasTerminal {
         }
       )._renderer;
       renderer?._observerDisposable?.clear?.();
-      renderer?.handleResize?.(this.term.cols, this.term.rows);
+      renderer?.handleResize?.(pane.term.cols, pane.term.rows);
+      pane.webgl = webgl;
       this.webglActive = true;
     } catch (err) {
       console.warn("[terminal] WebGL2 renderer unavailable, falling back to default renderer:", err);
+      pane.webgl = null;
       this.webglActive = false;
     }
   }
 
   getSize(): { cols: number; rows: number; xpixel: number; ypixel: number } {
+    const pane = this.#activePane ?? this.#panes.values().next().value;
     return {
-      cols: this.term.cols || 80,
-      rows: this.term.rows || 24,
+      cols: pane?.term.cols || 80,
+      rows: pane?.term.rows || 24,
       xpixel: Math.min(0xffff, Math.round(this.#container.clientWidth)),
       ypixel: Math.min(0xffff, Math.round(this.#container.clientHeight)),
     };
   }
 
-  fit(): void {
+  #fitPane(pane: TerminalPane): void {
     try {
-      this.fitAddon.fit();
-      const s = this.getSize();
-      this.#pty?.resize(s.cols, s.rows, s.xpixel, s.ypixel);
+      pane.fitAddon.fit();
+      const s = {
+        cols: pane.term.cols || 80,
+        rows: pane.term.rows || 24,
+        xpixel: Math.min(0xffff, Math.round(this.#container.clientWidth)),
+        ypixel: Math.min(0xffff, Math.round(this.#container.clientHeight)),
+      };
+      pane.pty?.resize(s.cols, s.rows, s.xpixel, s.ypixel);
     } catch {}
+  }
+
+  fit(): void {
+    const pane = this.#activePane;
+    if (pane) this.#fitPane(pane);
   }
 
   setFontSize(px: number): void {
     const clamped = Math.max(10, Math.min(28, Math.round(px)));
-    this.term.options.fontSize = clamped;
+    this.#fontSize = clamped;
     localStorage.setItem("unkernel-nvim.fontSize", String(clamped));
+    for (const pane of this.#panes.values()) {
+      pane.term.options.fontSize = clamped;
+      if (pane.id !== this.#activeId) {
+        this.#fitPane(pane);
+      }
+    }
     this.fit();
   }
 
   getFontSize(): number {
-    return this.term.options.fontSize ?? 15;
+    return this.#fontSize;
   }
 
   focus(): void {
-    this.term.focus();
+    this.#activePane?.term.focus();
   }
 
   sendText(text: string): void {
-    this.#pty?.write(this.#encoder.encode(text)).catch(() => {});
+    this.#activePane?.pty?.write(this.#encoder.encode(text)).catch(() => {});
+  }
+
+  mountSession(id: string, pty: Pty, scrollback = 0, opts: { activate?: boolean } = {}): void {
+    let pane: TerminalPane | undefined;
+
+    if (this.#unclaimedId) {
+      const claimed = this.#panes.get(this.#unclaimedId);
+      if (claimed) {
+        this.#panes.delete(this.#unclaimedId);
+        claimed.id = id;
+        claimed.el.dataset.sessionId = id;
+        this.#panes.set(id, claimed);
+        if (this.#activeId === this.#unclaimedId) {
+          this.#activeId = id;
+        }
+        pane = claimed;
+      }
+      this.#unclaimedId = null;
+    } else {
+      pane = this.#panes.get(id);
+    }
+
+    if (!pane) {
+      pane = this.#createPane(id, scrollback, false);
+      this.#panes.set(id, pane);
+    }
+
+    pane.pumpAbort?.abort();
+    const abort = new AbortController();
+    pane.pumpAbort = abort;
+    pane.pty = pty;
+    pane.scrollback = scrollback;
+    pane.term.reset();
+    pane.term.options.scrollback = scrollback;
+
+    if (opts.activate ?? true) {
+      this.activateSession(id, false);
+    } else {
+      this.#fitPane(pane);
+    }
+
+    void this.#pumpOutput(pane, pty, abort.signal);
+  }
+
+  activateSession(id: string, shouldFocus = true): void {
+    const target = this.#panes.get(id);
+    if (!target) return;
+
+    const prev = this.#activePane;
+    if (prev && prev !== target) {
+      prev.el.classList.remove("active");
+      this.#detachWebgl(prev);
+    }
+
+    this.#activeId = id;
+    target.el.classList.add("active");
+    this.#attachWebgl(target);
+    this.#fitPane(target);
+    if (shouldFocus) {
+      target.term.focus();
+    }
+  }
+
+  unmountSession(id: string): void {
+    const pane = this.#panes.get(id);
+    if (!pane) return;
+
+    pane.pumpAbort?.abort();
+    pane.pumpAbort = null;
+    pane.pty = null;
+    this.#detachWebgl(pane);
+    pane.term.dispose();
+    pane.el.remove();
+    this.#panes.delete(id);
+
+    if (this.#activeId === id) {
+      this.#activeId = null;
+      this.webglActive = false;
+    }
+  }
+
+  unmountAll(): void {
+    for (const id of [...this.#panes.keys()]) {
+      this.unmountSession(id);
+    }
+    this.#unclaimedId = null;
   }
 
   attachPty(pty: Pty, scrollback = 0): void {
-    this.#pumpAbort?.abort();
-    const abort = new AbortController();
-    this.#pumpAbort = abort;
-    this.#pty = pty;
-
-    this.term.reset();
-    this.term.options.scrollback = scrollback;
-    this.fit();
-
-    void this.#pumpOutput(pty, abort.signal);
+    const id = this.#activeId ?? "default";
+    this.mountSession(id, pty, scrollback, { activate: true });
   }
 
-  async #pumpOutput(pty: Pty, signal: AbortSignal): Promise<void> {
+  async #pumpOutput(pane: TerminalPane, pty: Pty, signal: AbortSignal): Promise<void> {
     const reader = pty.output.getReader();
     let sliceStart = performance.now();
     let sliceBytes = 0;
@@ -314,7 +508,7 @@ export class CanvasTerminal {
           this.#onFirstOutput?.();
         }
         await new Promise<void>((resolve) => {
-          this.term.write(value, resolve);
+          pane.term.write(value, resolve);
         });
         sliceBytes += value.byteLength;
         if (sliceBytes >= SLICE_BYTES || performance.now() - sliceStart >= SLICE_MS) {

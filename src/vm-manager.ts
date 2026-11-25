@@ -58,6 +58,19 @@ import {
   type SessionMetadata,
   type SuspendedSession,
 } from "./suspended-session.ts";
+import {
+  MAX_TERMINAL_SESSIONS,
+  nextSessionTitle,
+  pickNextActiveSessionId,
+  reconcileRestoredSessions,
+  type SessionMode,
+  type SuspendedTerminalEntry,
+  type TerminalSessionRecord,
+} from "./terminal-sessions.ts";
+
+export interface TerminalSession extends TerminalSessionRecord {
+  pty: Pty | null;
+}
 
 const DISK_VERSION = "v2"; // aarch64 + unkernel 0.2.0 distro overlay layout
 const DISK_SIZE_BYTES = DEFAULT_DISK_GIB * GIB;
@@ -177,9 +190,9 @@ function loadDistro(): Distro {
 
 export class VmManager {
   vm: KernelHandle | null = null;
-  activePty: Pty | null = null;
-  currentMode: "nvim" | "shell" = "nvim";
-  currentCwd = "/workspace";
+  #sessions: TerminalSession[] = [];
+  #activeSessionId: string | null = null;
+  #nextSessionSeq = 1;
   mountedFolders: Map<string, MountedFolder> = new Map();
   wispUrl: string = localStorage.getItem("unkernel-nvim.wisp") ?? "";
   netMode: NetMode = loadInitialNetMode(this.wispUrl);
@@ -202,6 +215,31 @@ export class VmManager {
   memoryAllocatedMiB: number | null = null;
   memoryFallbackReasons: string[] = [];
   seededFromCache = false;
+
+  get sessions(): readonly TerminalSession[] {
+    return this.#sessions;
+  }
+
+  get activeSessionId(): string | null {
+    return this.#activeSessionId;
+  }
+
+  get activeSession(): TerminalSession | null {
+    if (!this.#activeSessionId) return null;
+    return this.#sessions.find((s) => s.id === this.#activeSessionId) ?? null;
+  }
+
+  get activePty(): Pty | null {
+    return this.activeSession?.pty ?? null;
+  }
+
+  get currentMode(): SessionMode {
+    return this.activeSession?.mode ?? "nvim";
+  }
+
+  get currentCwd(): string {
+    return this.activeSession?.cwd ?? "/workspace";
+  }
 
   get distro(): Distro {
     return this.#distro;
@@ -349,17 +387,20 @@ export class VmManager {
   }
 
   #onStatus: (s: BootStatusUpdate) => void;
-  #onSessionExit?: (mode: "nvim" | "shell", end: PtyEnd) => void;
+  #onSessionExit?: (session: TerminalSession, end: PtyEnd) => void;
+  #onSessionsChange?: () => void;
   #onNotice?: (message: string) => void;
 
   constructor(opts: {
     onStatus: (s: BootStatusUpdate) => void;
-    onSessionExit?: (mode: "nvim" | "shell", end: PtyEnd) => void;
+    onSessionExit?: (session: TerminalSession, end: PtyEnd) => void;
+    onSessionsChange?: () => void;
     onNotice?: (message: string) => void;
     commands?: CommandsOption;
   }) {
     this.#onStatus = opts.onStatus;
     this.#onSessionExit = opts.onSessionExit;
+    this.#onSessionsChange = opts.onSessionsChange;
     this.#onNotice = opts.onNotice;
     this.#commands = opts.commands;
   }
@@ -413,7 +454,7 @@ export class VmManager {
     return bytes;
   }
 
-  async boot(cols: number, rows: number, pixels: Pick<PtySize, "xpixel" | "ypixel"> = {}): Promise<Pty | undefined> {
+  async boot(cols: number, rows: number, pixels: Pick<PtySize, "xpixel" | "ypixel"> = {}): Promise<TerminalSession[]> {
     const distro = this.#distro;
     const release = await acquireDiskLock(DISTROS[distro].diskName);
     let saved: SuspendedSession | undefined;
@@ -421,7 +462,7 @@ export class VmManager {
       saved = await readSuspendedSession(distro);
       if (!saved) {
         await this.#boot(cols, rows);
-        return;
+        return [];
       }
       this.#onStatus({ phase: "boot", title: "正在读取挂起会话…" });
       const snapshot = decodeSnapshot(new Uint8Array(await saved.snapshot.arrayBuffer()));
@@ -430,21 +471,51 @@ export class VmManager {
         this.#onNotice?.("会话已恢复，但无法清除旧快照");
       });
       const size = { cols, rows, ...pixels };
-      if (saved.terminalId) {
+      const entries = reconcileRestoredSessions(saved.sessions, saved, snapshot.ttys);
+      this.#shellPath = saved.shell;
+      if (saved.shell !== DEFAULT_SHELL) {
+        void this.#resolveShell(vm);
+      }
+
+      const restored: TerminalSession[] = [];
+      for (const entry of entries) {
         try {
-          this.#shellPath = saved.shell;
-          const pty = await vm.attach(saved.terminalId, { ...size, timeout: 8000 });
-          if (saved.shell !== DEFAULT_SHELL) {
-            void this.#resolveShell(vm);
-          }
-          return this.#setSession(pty, saved.mode, saved.cwd);
+          const pty = await vm.attach(entry.terminalId, { ...size, timeout: 8000 });
+          const session = this.#registerSession(pty, entry.mode, entry.cwd, {
+            id: entry.id,
+            title: entry.title,
+            activate: false,
+            ready: false,
+          });
+          restored.push(session);
         } catch {
-          this.#onNotice?.("虚拟机已恢复。原终端已结束，正在打开新会话。");
+          // Session already ended before or during restore
         }
       }
-      return await this.startSession(saved.mode, size, saved.cwd);
+
+      if (restored.length > 0) {
+        const activeSavedId = saved.activeSessionId;
+        const preferred =
+          (activeSavedId && restored.find((s) => s.id === activeSavedId)) ||
+          restored[0]!;
+        this.#activeSessionId = preferred.id;
+        this.#onSessionsChange?.();
+        this.#onStatus({ phase: "ready", title: "Ready" });
+        if (restored.length < entries.length) {
+          this.#onNotice?.(`已恢复 ${restored.length} / ${entries.length} 个终端会话`);
+        }
+        return restored;
+      }
+
+      if (entries.length > 0 || saved.terminalId) {
+        this.#onNotice?.("虚拟机已恢复。原终端已结束，正在打开新会话。");
+      }
+      const fallback = await this.openSession(saved.mode, size, saved.cwd);
+      return [fallback];
     } catch (err) {
       this.#stopWasiServer();
+      this.#sessions = [];
+      this.#activeSessionId = null;
       if (this.vm) await this.vm.stop().catch(() => {});
       this.vm = null;
       release();
@@ -664,15 +735,38 @@ export class VmManager {
   }
 
   async startSession(
-    mode: "nvim" | "shell",
+    mode: SessionMode,
     size: { cols: number; rows: number; xpixel?: number; ypixel?: number },
     targetPath?: string,
   ): Promise<Pty> {
+    const session = await this.openSession(mode, size, targetPath, {
+      replaceSessionId: this.#activeSessionId ?? undefined,
+    });
+    return session.pty!;
+  }
+
+  async openSession(
+    mode: SessionMode,
+    size: { cols: number; rows: number; xpixel?: number; ypixel?: number },
+    targetPath?: string,
+    opts?: { replaceSessionId?: string; title?: string },
+  ): Promise<TerminalSession> {
     if (!this.vm || this.#suspending) throw new Error("虚拟机当前无法打开终端");
-    const previousPty = this.activePty;
-    if (previousPty) {
-      this.activePty = null;
-      await previousPty.close().catch(() => {});
+    const replaceIdx = opts?.replaceSessionId
+      ? this.#sessions.findIndex((s) => s.id === opts.replaceSessionId)
+      : -1;
+    if (replaceIdx === -1 && this.#sessions.length >= MAX_TERMINAL_SESSIONS) {
+      throw new Error(`最多同时保留 ${MAX_TERMINAL_SESSIONS} 个终端会话，请先关闭其他标签页`);
+    }
+
+    if (replaceIdx >= 0) {
+      const prev = this.#sessions[replaceIdx]!;
+      const prevPty = prev.pty;
+      prev.pty = null;
+      prev.exited = true;
+      if (prevPty) {
+        await prevPty.close().catch(() => {});
+      }
     }
 
     const cwd = targetPath ?? this.currentCwd;
@@ -717,10 +811,19 @@ export class VmManager {
       throw err;
     };
 
+    const register = (pty: Pty) =>
+      this.#registerSession(pty, mode, cwd, {
+        id: replaceIdx >= 0 ? this.#sessions[replaceIdx]!.id : undefined,
+        title: opts?.title,
+        replaceIndex: replaceIdx >= 0 ? replaceIdx : undefined,
+        activate: true,
+        ready: true,
+      });
+
     if (mode === "nvim") {
       try {
         const pty = await spawnSession("/usr/bin/nvim", [], resolvedShell ?? DEFAULT_SHELL);
-        return this.#setSession(pty, mode, cwd);
+        return register(pty);
       } catch (err) {
         return await throwDistroBootErrorIfBase(err);
       }
@@ -732,7 +835,7 @@ export class VmManager {
       try {
         const pty = await spawnSession(candidate, ["-l"], candidate);
         this.#shellPath = candidate;
-        return this.#setSession(pty, mode, cwd);
+        return register(pty);
       } catch (err) {
         await throwDistroBootErrorIfBase(err).catch((bootOrOriginal) => {
           if (bootOrOriginal !== err) throw bootOrOriginal;
@@ -747,22 +850,101 @@ export class VmManager {
     throw new Error("未找到可用的交互式 Shell");
   }
 
-  #setSession(pty: Pty, mode: "nvim" | "shell", cwd: string): Pty {
-    this.currentMode = mode;
-    this.currentCwd = cwd;
-    this.activePty = pty;
+  #registerSession(
+    pty: Pty,
+    mode: SessionMode,
+    cwd: string,
+    opts: {
+      id?: string;
+      title?: string;
+      replaceIndex?: number;
+      activate: boolean;
+      ready: boolean;
+    },
+  ): TerminalSession {
+    let id = opts.id;
+    if (!id) {
+      do {
+        id = `pty-${this.#nextSessionSeq++}`;
+      } while (this.#sessions.some((s) => s.id === id));
+    }
+    const others =
+      opts.replaceIndex !== undefined
+        ? this.#sessions.filter((_, i) => i !== opts.replaceIndex)
+        : this.#sessions;
+    const title = opts.title ?? nextSessionTitle(mode, this.shellName, others);
+
+    const session: TerminalSession = {
+      id,
+      mode,
+      title,
+      cwd,
+      terminalId: pty.sessionId,
+      exited: false,
+      exitCode: null,
+      pty,
+    };
+
+    if (opts.replaceIndex !== undefined) {
+      this.#sessions[opts.replaceIndex] = session;
+    } else {
+      this.#sessions.push(session);
+    }
+
+    if (opts.activate) {
+      this.#activeSessionId = session.id;
+    }
+
     void pty.ended.then(
       (end) => {
-        if (this.activePty === pty) {
-          this.activePty = null;
-          if (!this.#suspending) this.#onSessionExit?.(mode, end);
-        }
+        if (session.pty !== pty) return;
+        session.pty = null;
+        session.exited = true;
+        session.exitCode = end.type === "exit" ? end.code : null;
+        this.#onSessionsChange?.();
+        if (!this.#suspending) this.#onSessionExit?.(session, end);
       },
-      () => {},
+      () => {
+        if (session.pty !== pty) return;
+        session.pty = null;
+        session.exited = true;
+        this.#onSessionsChange?.();
+      },
     );
 
-    this.#onStatus({ phase: "ready", title: "Ready" });
-    return pty;
+    if (opts.activate) {
+      this.#onSessionsChange?.();
+    }
+    if (opts.ready) {
+      this.#onStatus({ phase: "ready", title: "Ready" });
+    }
+    return session;
+  }
+
+  switchSession(id: string): TerminalSession | null {
+    const target = this.#sessions.find((s) => s.id === id);
+    if (!target) return null;
+    this.#activeSessionId = target.id;
+    this.#onSessionsChange?.();
+    return target;
+  }
+
+  async closeSession(id: string): Promise<{ closed: TerminalSession; nextActive: TerminalSession | null } | null> {
+    const target = this.#sessions.find((s) => s.id === id);
+    if (!target) return null;
+
+    const nextId = pickNextActiveSessionId(this.#sessions, id, this.#activeSessionId);
+    this.#sessions = this.#sessions.filter((s) => s.id !== id);
+    this.#activeSessionId = nextId;
+
+    const pty = target.pty;
+    target.pty = null;
+    target.exited = true;
+    if (pty) {
+      await pty.close().catch(() => {});
+    }
+    this.#onSessionsChange?.();
+    return { closed: target, nextActive: this.activeSession };
   }
 
   async mountHostDirectory(dirFs: BrowserDirectoryFs): Promise<MountedFolder> {
@@ -928,15 +1110,31 @@ export class VmManager {
       throw new Error("请先卸载本地目录，再挂起虚拟机");
     }
     const distro = this.activeDistro;
+    const liveSessions = this.#sessions.filter((s) => !s.exited && s.pty !== null);
+    const suspendedEntries: SuspendedTerminalEntry[] = [];
+    for (const s of liveSessions) {
+      if (!s.pty?.sessionId) {
+        throw new Error(`终端会话 ${s.title} 不支持续接，请重新打开后再挂起`);
+      }
+      suspendedEntries.push({
+        id: s.id,
+        mode: s.mode,
+        title: s.title,
+        cwd: s.cwd,
+        terminalId: s.pty.sessionId,
+      });
+    }
+    const active = this.activeSession;
     const session: SessionMetadata = {
       id: Array.from(crypto.getRandomValues(new Uint32Array(4))).join("-"),
       mode: this.currentMode,
       cwd: this.currentCwd,
       shell: this.shellPath,
-      terminalId: this.activePty?.sessionId,
+      terminalId: active?.pty?.sessionId ?? suspendedEntries[0]?.terminalId,
+      activeSessionId: active && !active.exited ? active.id : suspendedEntries[0]?.id,
+      sessions: suspendedEntries,
       network: this.#bootedNetwork,
     };
-    if (this.activePty && !session.terminalId) throw new Error("此终端不支持续接，请重新打开终端后挂起");
     this.#suspending = true;
     let bytes = 0;
     try {
@@ -944,8 +1142,11 @@ export class VmManager {
         dropCaches: true,
         commitTimeoutMs: 60_000,
         commit: async (snapshot, signal) => {
-          if (session.terminalId && !snapshot.ttys?.some((tty) => tty.id === session.terminalId)) {
-            throw new Error("终端会话已结束，请重试");
+          const ttyIds = new Set((snapshot.ttys ?? []).map((tty) => tty.id));
+          for (const entry of suspendedEntries) {
+            if (!ttyIds.has(entry.terminalId)) {
+              throw new Error(`终端会话 ${entry.title} 已结束，请重试`);
+            }
           }
           bytes = await writeSuspendedSession(distro, session, snapshot, signal);
           if (signal.aborted) {
@@ -955,8 +1156,10 @@ export class VmManager {
         },
       });
       this.#stopWasiServer();
-      this.activePty = null;
+      this.#sessions = [];
+      this.#activeSessionId = null;
       this.vm = null;
+      this.#onSessionsChange?.();
       this.#onStatus({
         phase: "suspended",
         title: `${DISTROS[distro].label} 已挂起`,

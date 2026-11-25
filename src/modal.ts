@@ -15,12 +15,12 @@ import {
   validateCustomMemoryInput,
   type MemoryConfigMiB,
 } from "./memory-config.ts";
-import { SHELL_SCROLLBACK_LINES, type CanvasTerminal } from "./terminal.ts";
+import { type CanvasTerminal } from "./terminal.ts";
+import { MAX_TERMINAL_SESSIONS, type SessionMode } from "./terminal-sessions.ts";
 import { getSameOriginWispUrl, type NetMode, type VmManager } from "./vm-manager.ts";
 
 const MODAL_TABS = ["workspace", "storage", "system"] as const;
 type ModalTab = (typeof MODAL_TABS)[number];
-type SessionMode = VmManager["currentMode"];
 type DiskAction = "storage" | "restart";
 
 function escapeHtml(val: string): string {
@@ -38,8 +38,10 @@ export interface ModalControllerOptions {
   vmManager: VmManager;
   terminal: CanvasTerminal;
   onOpenPreview: () => void;
+  onOpenSession: (mode: SessionMode, opts?: { cwd?: string; replaceActive?: boolean }) => Promise<void>;
+  onSelectSession: (id: string) => void;
+  onCloseSession: (id: string) => Promise<void>;
   toast: (msg: string) => void;
-  onSessionChange?: (mode: SessionMode) => void;
 }
 
 export class ModalController {
@@ -49,8 +51,10 @@ export class ModalController {
   #vmManager: VmManager;
   #terminal: CanvasTerminal;
   #toast: (msg: string) => void;
-  #onSessionChange?: (mode: SessionMode) => void;
   #onOpenPreview: () => void;
+  #onOpenSession: (mode: SessionMode, opts?: { cwd?: string; replaceActive?: boolean }) => Promise<void>;
+  #onSelectSession: (id: string) => void;
+  #onCloseSession: (id: string) => Promise<void>;
   #tab: ModalTab = "workspace";
   #open = false;
   #pillHidden = localStorage.getItem("unkernel-nvim.hidePill") === "1";
@@ -65,8 +69,10 @@ export class ModalController {
     this.#vmManager = opts.vmManager;
     this.#terminal = opts.terminal;
     this.#toast = opts.toast;
-    this.#onSessionChange = opts.onSessionChange;
     this.#onOpenPreview = opts.onOpenPreview;
+    this.#onOpenSession = opts.onOpenSession;
+    this.#onSelectSession = opts.onSelectSession;
+    this.#onCloseSession = opts.onCloseSession;
 
     if (this.#pillHidden) {
       this.#pill.classList.add("hidden-pill");
@@ -211,8 +217,9 @@ export class ModalController {
     const panel = this.#panel("workspace");
     const pickerSupported = isDirectoryPickerSupported();
     const mounts = [...this.#vmManager.mountedFolders.values()];
-    const { activePty, currentCwd, currentMode } = this.#vmManager;
+    const { activeSession, activeSessionId, currentCwd, currentMode, sessions } = this.#vmManager;
     const distro = DISTROS[this.#vmManager.activeDistro].label;
+    const atLimit = sessions.length >= MAX_TERMINAL_SESSIONS;
     panel.innerHTML = `
       <div class="modal-section">
         <h3 class="modal-section-title">本地目录与常用路径</h3>
@@ -223,7 +230,7 @@ export class ModalController {
           </button>
           <button class="modal-btn" id="btn-open-workspace" type="button">
             <span>打开 /workspace</span>
-            <span class="modal-btn-desc">进入默认工作区</span>
+            <span class="modal-btn-desc">在工作区启动 Neovim</span>
           </button>
           <button class="modal-btn" id="btn-open-nvim-config" type="button">
             <span>打开 ~/.config/nvim</span>
@@ -251,20 +258,57 @@ export class ModalController {
       </div>
 
       <div class="modal-section">
-        <h3 class="modal-section-title">会话与终端</h3>
+        <h3 class="modal-section-title">会话与终端 (${sessions.length}/${MAX_TERMINAL_SESSIONS})</h3>
+        ${
+          sessions.length > 0
+            ? `<div class="mount-list">
+                ${sessions
+                  .map((s) => {
+                    const isActive = s.id === activeSessionId;
+                    const statusLabel = s.exited
+                      ? `已退出${typeof s.exitCode === "number" ? ` (${s.exitCode})` : ""}`
+                      : isActive
+                        ? "当前活跃"
+                        : "后台运行";
+                    return `
+                  <div class="mount-item">
+                    <span class="mount-item-path">${escapeHtml(s.title)} · <code>${escapeHtml(s.cwd)}</code> · <span class="row-hint">${escapeHtml(statusLabel)}</span></span>
+                    <div class="mount-item-actions">
+                      <button class="mini-btn ${isActive ? "active" : ""}" data-select-session="${escapeHtml(s.id)}" type="button" ${isActive ? "disabled" : ""}>${isActive ? "当前" : "切换"}</button>
+                      <button class="mini-btn" data-close-session="${escapeHtml(s.id)}" type="button">关闭</button>
+                    </div>
+                  </div>`;
+                  })
+                  .join("")}
+              </div>`
+            : ""
+        }
         <div class="modal-grid">
-          <button class="modal-btn" id="btn-restart-nvim" type="button">
-            <span>${activePty && currentMode === "nvim" ? "重启 Neovim" : "启动 Neovim"}</span>
+          <button class="modal-btn" id="btn-new-nvim" type="button" ${atLimit ? "disabled" : ""}>
+            <span>新建 Neovim 标签</span>
             <span class="modal-btn-desc">工作目录 <code>${escapeHtml(currentCwd)}</code></span>
           </button>
-          <button class="modal-btn" id="btn-switch-shell" type="button">
-            <span>${activePty && currentMode === "shell" ? "重启" : "打开"} ${distro} Shell</span>
-            <span class="modal-btn-desc">打开 ${escapeHtml(this.#vmManager.shellName)} 终端命令行</span>
+          <button class="modal-btn" id="btn-new-shell" type="button" ${atLimit ? "disabled" : ""}>
+            <span>新建 ${distro} Shell 标签</span>
+            <span class="modal-btn-desc">后台并存，不中断当前 Neovim</span>
+          </button>
+          <button class="modal-btn" id="btn-restart-session" type="button">
+            <span>${activeSession ? `重启当前 ${escapeHtml(activeSession.title)}` : "启动 Neovim"}</span>
+            <span class="modal-btn-desc">${currentMode === "nvim" ? "在当前目录重建 Neovim" : `在当前目录重建 ${escapeHtml(this.#vmManager.shellName)}`}</span>
           </button>
           <button class="modal-btn" id="btn-open-preview" type="button">
             <span>Guest 端口预览</span>
             <span class="modal-btn-desc">打开虚拟机内的网页与开发服务器</span>
           </button>
+        </div>
+        <div class="row-bar">
+          <span class="row-label">终端快捷键</span>
+          <div class="row-controls">
+            <kbd>Ctrl+⇧+←/→</kbd>
+            <span class="row-hint">切换标签</span>
+            <kbd>Ctrl+⇧+\\</kbd>
+            <span class="row-hint">快速切 Shell</span>
+          </div>
         </div>
         <div class="row-bar">
           <span class="row-label">终端字号</span>
@@ -527,16 +571,31 @@ export class ModalController {
     });
 
     q("#btn-open-workspace").addEventListener("click", () => {
-      void this.#switchSession("nvim", "/workspace");
+      void this.#switchSession("nvim", "/workspace", Boolean(this.#vmManager.activeSession?.exited));
     });
 
     q("#btn-open-nvim-config").addEventListener("click", () => {
-      void this.#switchSession("nvim", "/root/.config/nvim");
+      void this.#switchSession("nvim", "/root/.config/nvim", Boolean(this.#vmManager.activeSession?.exited));
     });
 
     for (const btn of panel.querySelectorAll<HTMLButtonElement>("[data-open-mount]")) {
       btn.addEventListener("click", () => {
-        void this.#switchSession("nvim", btn.dataset.openMount!);
+        void this.#switchSession("nvim", btn.dataset.openMount!, Boolean(this.#vmManager.activeSession?.exited));
+      });
+    }
+
+    for (const btn of panel.querySelectorAll<HTMLButtonElement>("[data-select-session]")) {
+      btn.addEventListener("click", () => {
+        this.#onSelectSession(btn.dataset.selectSession!);
+        this.close();
+      });
+    }
+
+    for (const btn of panel.querySelectorAll<HTMLButtonElement>("[data-close-session]")) {
+      btn.addEventListener("click", async () => {
+        if (this.#startingSession || this.#diskAction) return;
+        await this.#onCloseSession(btn.dataset.closeSession!);
+        if (this.#open) this.#renderWorkspace();
       });
     }
 
@@ -554,12 +613,17 @@ export class ModalController {
       });
     }
 
-    q("#btn-restart-nvim").addEventListener("click", () => {
-      void this.#switchSession("nvim");
+    q("#btn-new-nvim").addEventListener("click", () => {
+      void this.#switchSession("nvim", undefined, false);
     });
 
-    q("#btn-switch-shell").addEventListener("click", () => {
-      void this.#switchSession("shell");
+    q("#btn-new-shell").addEventListener("click", () => {
+      void this.#switchSession("shell", undefined, false);
+    });
+
+    q("#btn-restart-session").addEventListener("click", () => {
+      const active = this.#vmManager.activeSession;
+      void this.#switchSession(active?.mode ?? "nvim", active?.cwd, Boolean(active));
     });
 
     q("#btn-open-preview").addEventListener("click", () => {
@@ -820,13 +884,11 @@ export class ModalController {
     });
   }
 
-  async #switchSession(mode: SessionMode, dir?: string): Promise<void> {
+  async #switchSession(mode: SessionMode, dir?: string, replaceActive = false): Promise<void> {
     if (this.#startingSession || this.#diskAction) return;
     this.#startingSession = true;
     try {
-      const pty = await this.#vmManager.startSession(mode, this.#terminal.getSize(), dir);
-      this.#terminal.attachPty(pty, mode === "shell" ? SHELL_SCROLLBACK_LINES : 0);
-      this.#onSessionChange?.(mode);
+      await this.#onOpenSession(mode, { cwd: dir, replaceActive });
       this.close();
     } catch (err) {
       this.#toast(`启动${mode === "nvim" ? " Neovim" : " Shell"}失败: ${(err as Error)?.message ?? String(err)}`);
