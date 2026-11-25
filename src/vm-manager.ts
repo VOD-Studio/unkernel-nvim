@@ -43,6 +43,14 @@ import {
   type MemoryConfigMiB,
 } from "./memory-config.ts";
 import {
+  DEFAULT_SHELL,
+  SHELL_PROBE_SCRIPT,
+  SHELL_PROBE_TIMEOUT_MS,
+  getShellCandidatesToTry,
+  isShellNotFoundError,
+  parseResolvedShell,
+} from "./shell-config.ts";
+import {
   deleteSuspendedSession,
   readSuspendedSession,
   ResumeSessionError,
@@ -53,8 +61,6 @@ import {
 
 const DISK_VERSION = "v2"; // aarch64 + unkernel 0.2.0 distro overlay layout
 const DISK_SIZE_BYTES = DEFAULT_DISK_GIB * GIB;
-const DEFAULT_SHELL = "/usr/bin/fish";
-const FALLBACK_SHELL = "/bin/sh";
 const CPU_STORAGE_KEY = "unkernel-nvim.cpus";
 const DISTRO_STORAGE_KEY = "unkernel-nvim.distro";
 const MAX_CPUS = 16; // CONFIG_NR_CPUS in the upstream SMP kernel
@@ -187,6 +193,7 @@ export class VmManager {
   #onlineCpuCount: number | null = null;
   #suspending = false;
   #shellPath: string | null = null;
+  #shellProbe: Promise<string | null> | null = null;
   #commands?: CommandsOption;
   #wasiServer: WasiExecServer | null = null;
   memoryConfigMiB: MemoryConfigMiB = loadStoredMemoryConfig();
@@ -427,6 +434,9 @@ export class VmManager {
         try {
           this.#shellPath = saved.shell;
           const pty = await vm.attach(saved.terminalId, { ...size, timeout: 8000 });
+          if (saved.shell !== DEFAULT_SHELL) {
+            void this.#resolveShell(vm);
+          }
           return this.#setSession(pty, saved.mode, saved.cwd);
         } catch {
           this.#onNotice?.("虚拟机已恢复。原终端已结束，正在打开新会话。");
@@ -559,6 +569,7 @@ export class VmManager {
     }
     this.#bootedNetwork = network;
     this.#shellPath = null;
+    this.#shellProbe = null;
     void this.#resolveShell(vm);
 
     if (cpus > 1) {
@@ -589,24 +600,42 @@ export class VmManager {
     return vm;
   }
 
-  async #resolveShell(vm: KernelHandle | null = this.vm): Promise<string> {
-    if (!vm) return FALLBACK_SHELL;
+  async #resolveShell(vm: KernelHandle | null = this.vm): Promise<string | null> {
+    if (!vm) return null;
     if (this.vm === vm && this.#shellPath === DEFAULT_SHELL) {
       return DEFAULT_SHELL;
     }
+    if (this.vm === vm && this.#shellProbe) {
+      return this.#shellProbe;
+    }
+
+    const probe = this.#probeShell(vm);
+    if (this.vm === vm) {
+      this.#shellProbe = probe;
+    }
     try {
-      const res = await vm.exec("/bin/sh", ["-c", `test -x ${DEFAULT_SHELL}`], {
+      return await probe;
+    } finally {
+      if (this.vm === vm && this.#shellProbe === probe) {
+        this.#shellProbe = null;
+      }
+    }
+  }
+
+  async #probeShell(vm: KernelHandle): Promise<string | null> {
+    try {
+      const res = await vm.exec("/bin/sh", ["-c", SHELL_PROBE_SCRIPT], {
         user: "root",
-        signal: AbortSignal.timeout(2000),
+        timeout: SHELL_PROBE_TIMEOUT_MS,
+        signal: AbortSignal.timeout(SHELL_PROBE_TIMEOUT_MS),
       });
-      const resolved = res.exitCode === 0 ? DEFAULT_SHELL : FALLBACK_SHELL;
-      if (this.vm === vm) this.#shellPath = resolved;
+      const resolved = res.exitCode === 0 ? parseResolvedShell(res.stdout) : null;
+      if (resolved && this.vm === vm) {
+        this.#shellPath = resolved;
+      }
       return resolved;
     } catch {
-      if (this.vm === vm && this.#shellPath === null) {
-        this.#shellPath = FALLBACK_SHELL;
-      }
-      return this.#shellPath ?? FALLBACK_SHELL;
+      return null;
     }
   }
 
@@ -647,7 +676,7 @@ export class VmManager {
     }
 
     const cwd = targetPath ?? this.currentCwd;
-    const shell = await this.#resolveShell(this.vm);
+    const resolvedShell = await this.#resolveShell(this.vm);
 
     this.#onStatus({
       phase: "userspace",
@@ -655,12 +684,8 @@ export class VmManager {
       detail: cwd,
     });
 
-    const file = mode === "nvim" ? "/usr/bin/nvim" : shell;
-    const args = mode === "nvim" ? [] : ["-l"];
-
-    let pty: Pty;
-    try {
-      pty = await this.vm.spawn(file, args, {
+    const spawnSession = (file: string, args: string[], shellEnv: string) =>
+      this.vm!.spawn(file, args, {
         user: "root",
         detachable: true,
         cols: size.cols,
@@ -673,15 +698,16 @@ export class VmManager {
           HOME: "/root",
           USER: "root",
           LOGNAME: "root",
-          SHELL: shell,
+          SHELL: shellEnv,
           PATH: "/run/kw/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/kw/bin",
           TERM: "xterm-256color",
           COLORTERM: "truecolor",
           LANG: "C.UTF-8",
         },
       });
-    } catch (err) {
-      const reason = await this.#readBaseShellReason(this.vm);
+
+    const throwDistroBootErrorIfBase = async (err: unknown): Promise<never> => {
+      const reason = this.vm ? await this.#readBaseShellReason(this.vm) : null;
       if (reason) {
         throw new Error(
           `${DISTROS[this.activeDistro].label} 系统镜像无法引导（${reason}）。请运行 bun run prebake ${this.activeDistro} 刷新本地镜像后刷新页面。`,
@@ -689,9 +715,36 @@ export class VmManager {
         );
       }
       throw err;
+    };
+
+    if (mode === "nvim") {
+      try {
+        const pty = await spawnSession("/usr/bin/nvim", [], resolvedShell ?? DEFAULT_SHELL);
+        return this.#setSession(pty, mode, cwd);
+      } catch (err) {
+        return await throwDistroBootErrorIfBase(err);
+      }
     }
 
-    return this.#setSession(pty, mode, cwd);
+    const candidates = getShellCandidatesToTry(resolvedShell);
+    for (let i = 0; i < candidates.length; i++) {
+      const candidate = candidates[i]!;
+      try {
+        const pty = await spawnSession(candidate, ["-l"], candidate);
+        this.#shellPath = candidate;
+        return this.#setSession(pty, mode, cwd);
+      } catch (err) {
+        await throwDistroBootErrorIfBase(err).catch((bootOrOriginal) => {
+          if (bootOrOriginal !== err) throw bootOrOriginal;
+        });
+        if (i < candidates.length - 1 && isShellNotFoundError(err)) {
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    throw new Error("未找到可用的交互式 Shell");
   }
 
   #setSession(pty: Pty, mode: "nvim" | "shell", cwd: string): Pty {

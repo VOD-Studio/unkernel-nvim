@@ -428,6 +428,16 @@ if contains -- "$TERM" linux vt102 ""
     set -gx TERM xterm-256color
 end
 EOF
+      if [ -f /etc/profile.d/kw-prompt.sh ]; then
+        cat > /etc/profile.d/kw-prompt.sh << 'EOF'
+${alpine ? "" : "export LANG=\${LANG:-C.UTF-8}\n"}if [ -n "\${BASH_VERSION-}" ] || [ -n "\${BB_ASH_VERSION-}" ]; then
+  PS1='\\[\\033[36m\\]\\w \\[\\033[35m\\]⇒\\[\\033[0m\\] '
+else
+  [ "$(id -u)" -eq 0 ] && PS1='# ' || PS1='$ '
+fi
+export PS1${alpine ? " ENV=/usr/lib/kw/shrc" : ""}
+EOF
+      fi
       `,
     );
 
@@ -437,11 +447,19 @@ EOF
       export HOME=/root
       nvim --version | head -n 2
       fish --version
+      grep -qx 'root:.*:/usr/bin/fish' /etc/passwd
       fish_err=$(fish -l -c 'command -v nvim fd rg stylua lua-language-server >/dev/null' 2>&1)
       if [ -n "$fish_err" ]; then
         echo "Unexpected fish stderr: $fish_err" >&2
         exit 1
       fi
+      ${alpine ? "" : `
+      sh_ps1=$(/bin/sh -l -c 'printf "%s" "$PS1"' 2>/dev/null || true)
+      if printf '%s' "$sh_ps1" | grep -qF '\\033'; then
+        echo "Unexpected literal prompt escapes in /bin/sh PS1: $sh_ps1" >&2
+        exit 1
+      fi
+      `}
       lua-language-server --version
       stylua --version
       rg --version | head -n 1
