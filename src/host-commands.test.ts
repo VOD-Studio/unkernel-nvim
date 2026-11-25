@@ -98,6 +98,7 @@ function makeMockDeps(overrides: Partial<HostCommandDeps> = {}): HostCommandDeps
     navigatePreview: () => {},
     openUrl: () => true,
     readGuestFile: async () => new Uint8Array([1, 2, 3]),
+    writeGuestFile: async () => {},
     writeGuestFiles: async (files, dir) => files.map((f) => `${dir}/${f.name}`),
     triggerDownload: () => {},
     pickUploadFiles: async () => [],
@@ -188,6 +189,31 @@ describe("createHostCommands", () => {
 
     const pasteRun = makeMockContext({ name: "pbpaste" });
     expect(await cmds.pbpaste!(pasteRun.ctx)).toBe("from-host");
+  });
+
+  test("pbcopy and pbpaste support optional guest file paths for large transfers", async () => {
+    let copied = "";
+    const writtenFiles = new Map<string, Uint8Array>();
+    const cmds = createHostCommands(
+      makeMockDeps({
+        readGuestFile: async (p) => new TextEncoder().encode(`file:${p}`),
+        writeGuestFile: async (p, bytes) => {
+          writtenFiles.set(p, bytes);
+        },
+        readClipboard: async () => "from-host-clipboard",
+        writeClipboard: async (text) => {
+          copied = text;
+        },
+      }),
+    );
+
+    const copyFileRun = makeMockContext({ name: "pbcopy", args: ["notes.txt"] });
+    expect(await cmds.pbcopy!(copyFileRun.ctx)).toBe(0);
+    expect(copied).toBe("file:/workspace/notes.txt");
+
+    const pasteFileRun = makeMockContext({ name: "pbpaste", args: ["out.txt"] });
+    expect(await cmds.pbpaste!(pasteFileRun.ctx)).toBe("/workspace/out.txt\n");
+    expect(new TextDecoder().decode(writtenFiles.get("/workspace/out.txt"))).toBe("from-host-clipboard");
   });
 
   test("preview dispatches open, close, navigate, and rejects bad args", async () => {

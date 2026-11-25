@@ -20,6 +20,7 @@ import {
   openDistroDisk,
   resetDataDisk,
   serveWasiPrograms,
+  sharedMemoryAvailable,
   snapshotCpuMismatch,
   snapshotDeviceMismatch,
   snapshotDiskMismatch,
@@ -78,6 +79,7 @@ import {
   isShellNotFoundError,
   parseResolvedShell,
 } from "./shell-config.ts";
+import { readGuestFileViaShm, writeGuestFileViaShm } from "./shm-transfer.ts";
 import {
   deleteSuspendedSession,
   readSuspendedSession,
@@ -709,11 +711,15 @@ export class VmManager {
           }
         : undefined;
 
+    const enableShm = restore
+      ? "shm" in restore.devices && restore.devices.shm !== undefined
+      : sharedMemoryAvailable();
+
     const presentDevices: Record<DeviceKind, boolean> = {
       display: false,
       sound: false,
       vsock: true,
-      shm: false,
+      shm: enableShm,
       network: Boolean(netSpec),
       gpu: false,
     };
@@ -843,6 +849,7 @@ export class VmManager {
       cpus,
       jit: true,
       vsock: true,
+      shm: enableShm,
       commands: this.#commands,
       ...(effectiveMemory !== null ? { memoryMiB: effectiveMemory } : {}),
       memoryFallbackMiB: [...MEMORY_FALLBACK_MIB],
@@ -1244,21 +1251,16 @@ export class VmManager {
 
   async readGuestFile(guestPath: string, signal?: AbortSignal): Promise<Uint8Array> {
     if (!this.vm || this.#suspending) throw new Error("虚拟机当前无法读取文件");
-    const res = await this.vm.exec(
-      "/bin/sh",
-      [
-        "-c",
-        'if [ ! -e "$1" ]; then echo "文件不存在: $1" >&2; exit 2; fi; if [ ! -f "$1" ]; then echo "不是普通文件: $1" >&2; exit 3; fi; exec cat -- "$1"',
-        "--",
-        guestPath,
-      ],
-      { user: "root", encoding: "buffer", signal },
-    );
-    if (res.exitCode !== 0) {
-      const msg = new TextDecoder().decode(res.stderr).trim();
-      throw new Error(msg || `读取失败 (exit=${res.exitCode})`);
-    }
-    return res.stdout;
+    const shm = this.vm instanceof WorkerKernel ? this.vm.shm : undefined;
+    return readGuestFileViaShm({ shm, exec: this.vm.exec.bind(this.vm) }, guestPath, signal);
+  }
+
+  async writeGuestFile(destPath: string, bytes: Uint8Array, signal?: AbortSignal): Promise<void> {
+    if (!this.vm || this.#suspending) throw new Error("虚拟机当前无法写入文件");
+    const slash = destPath.lastIndexOf("/");
+    const dir = slash > 0 ? destPath.slice(0, slash) : "/";
+    const shm = this.vm instanceof WorkerKernel ? this.vm.shm : undefined;
+    await writeGuestFileViaShm({ shm, exec: this.vm.exec.bind(this.vm) }, dir, destPath, bytes, signal);
   }
 
   async writeGuestFiles(
@@ -1270,6 +1272,8 @@ export class VmManager {
     const dir = targetDir.replace(/\/+$/, "") || "/";
     const used = new Set<string>();
     const written: string[] = [];
+    const shm = this.vm instanceof WorkerKernel ? this.vm.shm : undefined;
+    const exec = this.vm.exec.bind(this.vm);
 
     for (const file of files) {
       const base = sanitizeDropFilename(file.name);
@@ -1288,14 +1292,7 @@ export class VmManager {
 
       const destPath = dir === "/" ? `/${candidate}` : `${dir}/${candidate}`;
       const bytes = new Uint8Array(await file.arrayBuffer());
-      const res = await this.vm.exec(
-        "/bin/sh",
-        ["-e", "-c", 'mkdir -p -- "$1" && cat > "$2"', "--", dir, destPath],
-        { user: "root", input: bytes, signal },
-      );
-      if (res.exitCode !== 0) {
-        throw new Error(res.stderr.trim() || `写入 ${destPath} 失败 (exit=${res.exitCode})`);
-      }
+      await writeGuestFileViaShm({ shm, exec }, dir, destPath, bytes, signal);
       written.push(destPath);
     }
 
@@ -1495,6 +1492,15 @@ export class VmManager {
       runs: number;
       cachedModules: number;
     };
+    shm: {
+      enabled: boolean;
+      inPlace: boolean;
+      reads: number;
+      writes: number;
+      bytesRead: number;
+      bytesWritten: number;
+      inPlaceReads: number;
+    };
   } {
     const stats = this.vm ? this.vm.stats() : null;
     let diskBlocks = 0;
@@ -1503,6 +1509,8 @@ export class VmManager {
     }
     const memoryMiB = this.vm?.memoryMiB ?? 0;
     const wasiStats = this.#wasiServer?.stats;
+    const shmClient = this.vm instanceof WorkerKernel ? this.vm.shm : undefined;
+    const shmStats = shmClient?.stats ?? stats?.shm;
     return {
       transport: this.vm?.transport ?? "unknown",
       cpus: this.#onlineCpuCount ?? stats?.cpus ?? null,
@@ -1518,6 +1526,15 @@ export class VmManager {
         shared: this.#wasiServer?.shared ?? false,
         runs: wasiStats?.started ?? 0,
         cachedModules: wasiStats?.cached ?? 0,
+      },
+      shm: {
+        enabled: shmClient !== undefined,
+        inPlace: shmClient?.inPlace ?? false,
+        reads: shmStats?.reads ?? 0,
+        writes: shmStats?.writes ?? 0,
+        bytesRead: shmStats?.bytesRead ?? 0,
+        bytesWritten: shmStats?.bytesWritten ?? 0,
+        inPlaceReads: shmStats?.inPlaceReads ?? 0,
       },
     };
   }

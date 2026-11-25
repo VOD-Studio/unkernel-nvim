@@ -290,6 +290,7 @@ vmManager.setCommands(
     navigatePreview: (port, path) => preview.openAt(port, path),
     openUrl: (url) => Boolean(window.open(url, "_blank", "noopener,noreferrer")),
     readGuestFile: (guestPath, signal) => vmManager.readGuestFile(guestPath, signal),
+    writeGuestFile: (guestPath, bytes, signal) => vmManager.writeGuestFile(guestPath, bytes, signal),
     writeGuestFiles: (files, targetDir, signal) => vmManager.writeGuestFiles(files, targetDir, signal),
     triggerDownload: triggerBrowserDownload,
     pickUploadFiles: createBrowserFilePicker,

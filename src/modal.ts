@@ -487,6 +487,12 @@ export class ModalController {
     const wasiDetail = diag.wasi.active
       ? (diag.wasi.shared ? "共享内存 Worker" : "标准 Worker")
       : "未启用";
+    const shmValue = diag.shm.enabled
+      ? (diag.shm.inPlace ? "零拷贝 (in-place)" : "Worker 通道")
+      : "未启用";
+    const shmDetail = diag.shm.enabled
+      ? `读 ${formatByteSize(diag.shm.bytesRead)} / 写 ${formatByteSize(diag.shm.bytesWritten)}`
+      : "需要跨源隔离或 kwshm";
 
     panel.innerHTML = `
       ${
@@ -538,6 +544,11 @@ export class ModalController {
             <div class="stat-key">WASI 宿主加速</div>
             <div class="stat-val" id="stat-wasi-runs">${escapeHtml(wasiValue)}</div>
             <div class="stat-detail" id="stat-wasi-mode">${escapeHtml(wasiDetail)}</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-key">共享内存 (SHM)</div>
+            <div class="stat-val" id="stat-shm-mode">${escapeHtml(shmValue)}</div>
+            <div class="stat-detail" id="stat-shm-io">${escapeHtml(shmDetail)}</div>
           </div>
         </div>
       </div>
@@ -1048,6 +1059,16 @@ export class ModalController {
     setText(
       "#stat-wasi-mode",
       diag.wasi.active ? (diag.wasi.shared ? "共享内存 Worker" : "标准 Worker") : "未启用",
+    );
+    setText(
+      "#stat-shm-mode",
+      diag.shm.enabled ? (diag.shm.inPlace ? "零拷贝 (in-place)" : "Worker 通道") : "未启用",
+    );
+    setText(
+      "#stat-shm-io",
+      diag.shm.enabled
+        ? `读 ${formatByteSize(diag.shm.bytesRead)} / 写 ${formatByteSize(diag.shm.bytesWritten)}`
+        : "需要跨源隔离或 kwshm",
     );
   }
 

@@ -8,6 +8,7 @@ const MAX_PBCOPY_BYTES = 16 * 1024 * 1024;
 const MAX_DOWNLOAD_STDIN_BYTES = 64 * 1024 * 1024;
 
 const decoder = new TextDecoder();
+const encoder = new TextEncoder();
 
 export interface HostCommandDeps {
   readClipboard: () => Promise<string>;
@@ -17,6 +18,7 @@ export interface HostCommandDeps {
   navigatePreview: (port: number, path: string) => void;
   openUrl: (url: string) => boolean;
   readGuestFile: (guestPath: string, signal?: AbortSignal) => Promise<Uint8Array>;
+  writeGuestFile?: (guestPath: string, bytes: Uint8Array, signal?: AbortSignal) => Promise<void>;
   writeGuestFiles: (files: readonly File[], targetDir: string, signal?: AbortSignal) => Promise<string[]>;
   triggerDownload: (bytes: Uint8Array, filename: string) => void;
   pickUploadFiles: (signal: AbortSignal) => Promise<File[]>;
@@ -223,12 +225,22 @@ function errorMessage(err: unknown): string {
 export function createHostCommands(deps: HostCommandDeps): CommandsOption {
   return {
     async pbcopy(ctx) {
-      if (ctx.args[0] === "-h" || ctx.args[0] === "--help") {
-        await writeErr(ctx, "用法: <stdout> | pbcopy");
+      if (ctx.args[0] === "-h" || ctx.args[0] === "--help" || ctx.args.length > 1) {
+        await writeErr(ctx, "用法: <stdout> | pbcopy | pbcopy <file>");
         return 2;
       }
       try {
-        const bytes = await readStreamLimited(ctx.stdin, MAX_PBCOPY_BYTES, ctx.signal);
+        let bytes: Uint8Array;
+        if (ctx.args.length === 1) {
+          const home = ctx.env.HOME || "/root";
+          const guestPath = resolveGuestPath(ctx.cwd, ctx.args[0]!, home);
+          bytes = await deps.readGuestFile(guestPath, ctx.signal);
+          if (bytes.byteLength > MAX_PBCOPY_BYTES) {
+            throw new Error(`输入超出最大限制 (${Math.round(MAX_PBCOPY_BYTES / 1048576)} MiB)`);
+          }
+        } else {
+          bytes = await readStreamLimited(ctx.stdin, MAX_PBCOPY_BYTES, ctx.signal);
+        }
         await deps.writeClipboard(decoder.decode(bytes));
         return 0;
       } catch (err) {
@@ -238,12 +250,23 @@ export function createHostCommands(deps: HostCommandDeps): CommandsOption {
     },
 
     async pbpaste(ctx) {
-      if (ctx.args[0] === "-h" || ctx.args[0] === "--help") {
-        await writeErr(ctx, "用法: pbpaste");
+      if (ctx.args[0] === "-h" || ctx.args[0] === "--help" || ctx.args.length > 1) {
+        await writeErr(ctx, "用法: pbpaste [file]");
         return 2;
       }
       try {
-        return await deps.readClipboard();
+        const text = await deps.readClipboard();
+        if (ctx.args.length === 1) {
+          if (!deps.writeGuestFile) {
+            throw new Error("当前宿主环境不支持写入文件");
+          }
+          const home = ctx.env.HOME || "/root";
+          const guestPath = resolveGuestPath(ctx.cwd, ctx.args[0]!, home);
+          const bytes = encoder.encode(text);
+          await deps.writeGuestFile(guestPath, bytes, ctx.signal);
+          return `${guestPath}\n`;
+        }
+        return text;
       } catch (err) {
         await writeErr(ctx, `pbpaste: ${errorMessage(err)}`);
         return 1;
