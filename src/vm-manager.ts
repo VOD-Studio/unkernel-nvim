@@ -72,6 +72,13 @@ import {
   type MemoryConfigMiB,
 } from "./memory-config.ts";
 import {
+  areFetchRoutesEqual,
+  loadFetchRoutes,
+  resolveFetchRoutesForWorker,
+  saveFetchRoutes,
+  type FetchRouteMap,
+} from "./net-routes.ts";
+import {
   DEFAULT_SHELL,
   SHELL_PROBE_SCRIPT,
   SHELL_PROBE_TIMEOUT_MS,
@@ -251,7 +258,8 @@ export class VmManager {
   mountedFolders: Map<string, MountedFolder> = new Map();
   wispUrl: string = localStorage.getItem("unkernel-nvim.wisp") ?? "";
   netMode: NetMode = loadInitialNetMode(this.wispUrl);
-  #bootedNetwork: { mode: NetMode; servers: string[] } | null = null;
+  fetchRoutes: FetchRouteMap = loadFetchRoutes();
+  #bootedNetwork: { mode: NetMode; servers: string[]; routes: FetchRouteMap } | null = null;
   readonly cpuBlocker = webCpuBlocker({ worker: true });
   readonly cpuLimit = this.cpuBlocker ? 1 : Math.min(navigator.hardwareConcurrency || 1, MAX_CPUS);
   #distro = loadDistro();
@@ -434,8 +442,16 @@ export class VmManager {
     if (!this.vm || !network) return false;
     if (this.netMode !== network.mode) return true;
     const nextServers = this.getEffectiveWispServers();
-    return nextServers.length !== network.servers.length ||
-      nextServers.some((server, i) => server !== network.servers[i]);
+    if (
+      nextServers.length !== network.servers.length ||
+      nextServers.some((server, i) => server !== network.servers[i])
+    ) {
+      return true;
+    }
+    if (this.netMode !== "off" && !areFetchRoutesEqual(this.fetchRoutes, network.routes)) {
+      return true;
+    }
+    return false;
   }
 
   hasPendingRestartChanges(): boolean {
@@ -475,6 +491,15 @@ export class VmManager {
       if (val) localStorage.setItem("unkernel-nvim.wisp", val);
       else localStorage.removeItem("unkernel-nvim.wisp");
     }
+  }
+
+  setFetchRoutes(routes: FetchRouteMap): void {
+    this.fetchRoutes = { ...routes };
+    saveFetchRoutes(this.fetchRoutes);
+  }
+
+  getActiveFetchRouteCount(): number {
+    return Object.keys(this.#bootedNetwork?.routes ?? {}).length;
   }
 
   #onStatus: (s: BootStatusUpdate) => void;
@@ -624,7 +649,17 @@ export class VmManager {
       }
       this.#onStatus({ phase: "boot", title: "正在读取挂起会话…" });
       const snapshot = decodeSnapshot(new Uint8Array(await saved.snapshot.arrayBuffer()));
-      const vm = await this.#boot(cols, rows, snapshot, saved.network, mode);
+      const vm = await this.#boot(
+        cols,
+        rows,
+        snapshot,
+        {
+          mode: saved.network.mode,
+          servers: saved.network.servers,
+          routes: saved.network.routes ?? {},
+        },
+        mode,
+      );
       await deleteSuspendedSession(distro, saved.id).catch(() => {
         this.#onNotice?.("会话已恢复，但无法清除旧快照");
       });
@@ -686,7 +721,11 @@ export class VmManager {
     cols: number,
     rows: number,
     restore?: KernelSnapshot,
-    network = { mode: this.netMode, servers: this.getEffectiveWispServers() },
+    network: { mode: NetMode; servers: string[]; routes: FetchRouteMap } = {
+      mode: this.netMode,
+      servers: this.getEffectiveWispServers(),
+      routes: this.fetchRoutes,
+    },
     diskMode: DiskMode = "persistent",
   ): Promise<KernelHandle> {
     const distro = this.#distro;
@@ -698,6 +737,8 @@ export class VmManager {
     this.#onlineCpuCount = null;
     this.#lastDiskError = null;
 
+    const resolvedRoutes = resolveFetchRoutesForWorker(network.routes ?? {}, location.href);
+    const hasRoutes = Object.keys(resolvedRoutes).length > 0;
     const netSpec: NetSpec | undefined =
       (restore ? restore.devices.network : network.servers.length > 0)
         ? {
@@ -705,6 +746,7 @@ export class VmManager {
             backend: {
               kind: "wisp",
               servers: network.servers,
+              ...(hasRoutes ? { routes: resolvedRoutes } : {}),
             },
             mac: restore?.devices.network?.mac.map((byte) => byte.toString(16).padStart(2, "0")).join(":"),
             optional: true,

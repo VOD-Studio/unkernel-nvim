@@ -2,6 +2,7 @@
 
 import { encodeSnapshot, type KernelSnapshot } from "unkernel";
 import type { Distro } from "./distro.ts";
+import type { FetchRouteMap } from "./net-routes.ts";
 import type { SuspendedTerminalEntry } from "./terminal-sessions.ts";
 import type { NetMode } from "./vm-manager.ts";
 
@@ -16,7 +17,7 @@ export interface SessionMetadata {
   terminalId?: string;
   activeSessionId?: string;
   sessions?: SuspendedTerminalEntry[];
-  network: { mode: NetMode; servers: string[] };
+  network: { mode: NetMode; servers: string[]; routes?: FetchRouteMap };
 }
 
 export interface SuspendedSession extends SessionMetadata {

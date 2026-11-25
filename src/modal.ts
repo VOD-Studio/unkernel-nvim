@@ -16,6 +16,7 @@ import {
   validateCustomMemoryInput,
   type MemoryConfigMiB,
 } from "./memory-config.ts";
+import { formatFetchRoutesText, parseFetchRoutesText } from "./net-routes.ts";
 import { type CanvasTerminal } from "./terminal.ts";
 import { MAX_TERMINAL_SESSIONS, type SessionMode } from "./terminal-sessions.ts";
 import { getSameOriginWispUrl, type NetMode, type VmManager } from "./vm-manager.ts";
@@ -228,7 +229,7 @@ export class ModalController {
 
   #keepFocusInDialog(e: KeyboardEvent): void {
     const focusable = [...this.#dialog.querySelectorAll<HTMLElement>(
-      "button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex='0']",
+      "button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex='0']",
     )].filter((el) => el.tabIndex >= 0 && !el.closest("[hidden]"));
     const first = focusable[0];
     const last = focusable.at(-1);
@@ -481,8 +482,11 @@ export class ModalController {
     const blockDetail = block
       ? `${block.reads} 读 · ${block.writes} 写 · ${block.flushes} 刷盘`
       : "暂无 I/O 统计";
+    const activeRouteCount = this.#vmManager.getActiveFetchRouteCount();
     const netValue = net ? `收 ${net.rx} 帧 / 发 ${net.tx} 帧` : "离线";
-    const netDetail = net ? `TCP ${net.tcpOpened} · DNS ${net.dns}` : "未启用网络";
+    const netDetail = net
+      ? `TCP ${net.tcpOpened} · DNS ${net.dns}${activeRouteCount > 0 ? ` · ${activeRouteCount} 条直连路由` : ""}`
+      : "未启用网络";
     const wasiValue = `${diag.wasi.runs} 次运行 · ${diag.wasi.cachedModules} 缓存`;
     const wasiDetail = diag.wasi.active
       ? (diag.wasi.shared ? "共享内存 Worker" : "标准 Worker")
@@ -691,6 +695,27 @@ export class ModalController {
                   </div>
                 </div>`
               : ""
+        }
+        ${
+          this.#vmManager.netMode !== "off"
+            ? `<div class="row-bar row-bar-column">
+                <div class="row-label-group">
+                  <label class="row-label" for="input-fetch-routes">直连 HTTP 路由 (fetchRoutes)</label>
+                  <span class="row-hint">纯 HTTP 域名直接走浏览器 fetch() 绕过 Wisp（每行 <code>域名 = 目标基础 URL</code>，目标需支持 CORS 或为同源路径如 <code>/mirror</code>）</span>
+                </div>
+                <textarea
+                  class="text-input routes-textarea"
+                  id="input-fetch-routes"
+                  rows="3"
+                  spellcheck="false"
+                  placeholder="mirror.local = https://mirrors.example.com/alpine&#10;static.local = /mirror"
+                >${escapeHtml(formatFetchRoutesText(this.#vmManager.fetchRoutes))}</textarea>
+                <div class="routes-actions">
+                  <button class="mini-btn" id="btn-clear-routes" type="button">清空</button>
+                  <button class="mini-btn" id="btn-save-routes" type="button">保存路由</button>
+                </div>
+              </div>`
+            : ""
         }
       </div>
     `;
@@ -975,6 +1000,30 @@ export class ModalController {
       });
     }
 
+    const routesInput = q<HTMLTextAreaElement>("#input-fetch-routes");
+    if (routesInput) {
+      q("#btn-save-routes")?.addEventListener("click", () => {
+        const parsed = parseFetchRoutesText(routesInput.value);
+        if (!parsed.ok) {
+          this.#toast(parsed.error);
+          routesInput.focus();
+          return;
+        }
+        this.#vmManager.setFetchRoutes(parsed.routes);
+        routesInput.value = formatFetchRoutesText(parsed.routes);
+        this.#renderRestart();
+        const count = Object.keys(parsed.routes).length;
+        this.#toast(count > 0 ? `已保存 ${count} 条直连 HTTP 路由` : "已清空直连 HTTP 路由");
+      });
+      q("#btn-clear-routes")?.addEventListener("click", () => {
+        this.#vmManager.setFetchRoutes({});
+        routesInput.value = "";
+        this.#renderRestart();
+        this.#toast("已清空直连 HTTP 路由");
+        routesInput.focus();
+      });
+    }
+
     const showOverlayStatus = async () => {
       try {
         this.#toast("正在查询 kw-overlay status…");
@@ -1053,8 +1102,14 @@ export class ModalController {
       "#stat-block-ops",
       block ? `${block.reads} 读 · ${block.writes} 写 · ${block.flushes} 刷盘` : "暂无 I/O 统计",
     );
+    const activeRouteCount = this.#vmManager.getActiveFetchRouteCount();
     setText("#stat-net-io", net ? `收 ${net.rx} 帧 / 发 ${net.tx} 帧` : "离线");
-    setText("#stat-net-ops", net ? `TCP ${net.tcpOpened} · DNS ${net.dns}` : "未启用网络");
+    setText(
+      "#stat-net-ops",
+      net
+        ? `TCP ${net.tcpOpened} · DNS ${net.dns}${activeRouteCount > 0 ? ` · ${activeRouteCount} 条直连路由` : ""}`
+        : "未启用网络",
+    );
     setText("#stat-wasi-runs", `${diag.wasi.runs} 次运行 · ${diag.wasi.cachedModules} 缓存`);
     setText(
       "#stat-wasi-mode",
