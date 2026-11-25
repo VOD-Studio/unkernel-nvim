@@ -579,6 +579,30 @@ export class VmManager {
     }
   }
 
+  async #readBaseShellReason(vm: KernelHandle): Promise<string | null> {
+    try {
+      const res = await vm.exec("/bin/sh", ["-c", "cat /run/kw-base"], {
+        user: "root",
+        signal: AbortSignal.timeout(1500),
+      });
+      if (res.exitCode !== 0) return null;
+      let upper = "";
+      let why = "";
+      for (const line of res.stdout.split("\n")) {
+        const eq = line.indexOf("=");
+        if (eq === -1) continue;
+        const key = line.slice(0, eq).trim();
+        const val = line.slice(eq + 1).trim();
+        if (key === "upper") upper = val;
+        else if (key === "why") why = val;
+      }
+      if (upper === "none") return why || "回退到了基础 initramfs";
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
   async startSession(
     mode: "nvim" | "shell",
     size: { cols: number; rows: number; xpixel?: number; ypixel?: number },
@@ -603,25 +627,37 @@ export class VmManager {
     const file = mode === "nvim" ? "/usr/bin/nvim" : shell;
     const args = mode === "nvim" ? [] : ["-l"];
 
-    const pty = await this.vm.spawn(file, args, {
-      user: "root",
-      detachable: true,
-      cols: size.cols,
-      rows: size.rows,
-      xpixel: size.xpixel,
-      ypixel: size.ypixel,
-      cwd,
-      term: "xterm-256color",
-      env: {
-        HOME: "/root",
-        USER: "root",
-        LOGNAME: "root",
-        SHELL: shell,
-        TERM: "xterm-256color",
-        COLORTERM: "truecolor",
-        LANG: "C.UTF-8",
-      },
-    });
+    let pty: Pty;
+    try {
+      pty = await this.vm.spawn(file, args, {
+        user: "root",
+        detachable: true,
+        cols: size.cols,
+        rows: size.rows,
+        xpixel: size.xpixel,
+        ypixel: size.ypixel,
+        cwd,
+        term: "xterm-256color",
+        env: {
+          HOME: "/root",
+          USER: "root",
+          LOGNAME: "root",
+          SHELL: shell,
+          TERM: "xterm-256color",
+          COLORTERM: "truecolor",
+          LANG: "C.UTF-8",
+        },
+      });
+    } catch (err) {
+      const reason = await this.#readBaseShellReason(this.vm);
+      if (reason) {
+        throw new Error(
+          `${DISTROS[this.activeDistro].label} 系统镜像无法引导（${reason}）。请运行 bun run prebake ${this.activeDistro} 刷新本地镜像后刷新页面。`,
+          { cause: err },
+        );
+      }
+      throw err;
+    }
 
     return this.#setSession(pty, mode, cwd);
   }
