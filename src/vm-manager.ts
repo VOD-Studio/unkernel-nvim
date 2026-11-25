@@ -33,7 +33,16 @@ import {
   type WasiExecServer,
 } from "unkernel";
 import { DEFAULT_DISTRO, DISTROS, isDistro, releaseGuestAssetPath, type Distro } from "./distro.ts";
-import { DEFAULT_DISK_GIB, GIB, MAX_DISK_GIB, parseDiskGiB } from "./disk-config.ts";
+import {
+  DEFAULT_DISK_GIB,
+  GIB,
+  MAX_DISK_GIB,
+  parseDiskGiB,
+  parseDiskModeParam,
+  shouldDownloadTemplate,
+  SNAPSHOT_LIMIT_BYTES,
+  type DiskMode,
+} from "./disk-config.ts";
 import { BrowserDirectoryFs } from "./fs-bridge.ts";
 import { sanitizeDropFilename } from "./host-commands.ts";
 import {
@@ -78,11 +87,21 @@ const CPU_STORAGE_KEY = "unkernel-nvim.cpus";
 const DISTRO_STORAGE_KEY = "unkernel-nvim.distro";
 const MAX_CPUS = 16; // CONFIG_NR_CPUS in the upstream SMP kernel
 
-function acquireDiskLock(name: string): Promise<() => void> {
+export class DiskLockError extends Error {
+  readonly distro: Distro;
+
+  constructor(distro: Distro, message = "此发行版的持久化磁盘正在另一个标签页使用，请关闭该标签页或以内存快照模式启动。") {
+    super(message);
+    this.name = "DiskLockError";
+    this.distro = distro;
+  }
+}
+
+function acquireDiskLock(name: string, distro: Distro): Promise<() => void> {
   if (!navigator.locks) return Promise.resolve(() => {});
   return new Promise((resolve, reject) => {
     void navigator.locks.request(`kwdisk:${name}-${DISK_VERSION}`, { ifAvailable: true }, (lock) => {
-      if (!lock) throw new Error("此发行版的持久化磁盘正在另一个标签页使用，请关闭该标签页后刷新。");
+      if (!lock) throw new DiskLockError(distro);
       return new Promise<void>((release) => resolve(release));
     }).catch(reject);
   });
@@ -107,46 +126,61 @@ export interface MountedFolder {
 
 /**
  * Fast probe of the distro's IndexedDB disk to check whether the
- * persistent data disk has already been seeded on a previous visit.
- * An initialized disk only needs a size-matched empty template.
+ * persistent data disk has already been seeded and estimate its stored size.
  */
-async function isDataDiskSeeded(name: string): Promise<boolean> {
-  if (typeof indexedDB === "undefined") return false;
+async function probeDataDiskStore(name: string): Promise<{ seeded: boolean; storedBytes: number }> {
+  if (typeof indexedDB === "undefined") return { seeded: false, storedBytes: 0 };
   const dbName = `kwdisk:${name}-${DISK_VERSION}`;
-  return new Promise<boolean>((resolve) => {
+  return new Promise<{ seeded: boolean; storedBytes: number }>((resolve) => {
     try {
       const req = indexedDB.open(dbName, 1);
       req.onupgradeneeded = () => {
         // DB did not exist yet; abort creation so openDataDisk initializes it cleanly.
         req.transaction?.abort();
-        resolve(false);
+        resolve({ seeded: false, storedBytes: 0 });
       };
-      req.onerror = () => resolve(false);
+      req.onerror = () => resolve({ seeded: false, storedBytes: 0 });
       req.onsuccess = () => {
         const db = req.result;
         try {
           if (!db.objectStoreNames.contains("meta")) {
             db.close();
-            resolve(false);
+            resolve({ seeded: false, storedBytes: 0 });
             return;
           }
-          const tx = db.transaction("meta", "readonly");
-          const getReq = tx.objectStore("meta").get("initialized");
-          getReq.onsuccess = () => {
-            db.close();
-            resolve(getReq.result === true);
+          const storeNames = db.objectStoreNames.contains("blocks") ? ["meta", "blocks"] : ["meta"];
+          const tx = db.transaction(storeNames, "readonly");
+          let seeded = false;
+          let storedBytes = 0;
+          const initReq = tx.objectStore("meta").get("initialized");
+          initReq.onsuccess = () => {
+            seeded = initReq.result === true;
           };
-          getReq.onerror = () => {
+          if (storeNames.includes("blocks")) {
+            const countReq = tx.objectStore("blocks").count();
+            countReq.onsuccess = () => {
+              storedBytes = countReq.result * 4096;
+            };
+          }
+          tx.oncomplete = () => {
             db.close();
-            resolve(false);
+            resolve({ seeded, storedBytes });
+          };
+          tx.onerror = () => {
+            db.close();
+            resolve({ seeded: false, storedBytes: 0 });
+          };
+          tx.onabort = () => {
+            db.close();
+            resolve({ seeded: false, storedBytes: 0 });
           };
         } catch {
           db.close();
-          resolve(false);
+          resolve({ seeded: false, storedBytes: 0 });
         }
       };
     } catch {
-      resolve(false);
+      resolve({ seeded: false, storedBytes: 0 });
     }
   });
 }
@@ -215,6 +249,15 @@ export class VmManager {
   memoryAllocatedMiB: number | null = null;
   memoryFallbackReasons: string[] = [];
   seededFromCache = false;
+  diskMode: DiskMode = "persistent";
+
+  get isSnapshotMode(): boolean {
+    return this.diskMode === "snapshot";
+  }
+
+  get diskNotice(): string | null {
+    return this.vm instanceof WorkerKernel ? this.vm.disks[0]?.notice ?? null : null;
+  }
 
   get sessions(): readonly TerminalSession[] {
     return this.#sessions;
@@ -366,13 +409,14 @@ export class VmManager {
   }
 
   setDiskSize(gib: number): boolean {
+    if (this.isSnapshotMode) return false;
     if (!this.vm || !Number.isInteger(gib) || gib > MAX_DISK_GIB || gib * GIB < this.diskSize) return false;
     localStorage.setItem(diskSizeKey(this.activeDistro), String(gib));
     return true;
   }
 
   hasPendingDiskSizeChange(): boolean {
-    return this.vm !== null && this.targetDiskSize > this.diskSize;
+    return !this.isSnapshotMode && this.vm !== null && this.targetDiskSize > this.diskSize;
   }
 
   setNetworkConfig(mode: NetMode, customUrl?: string): void {
@@ -414,16 +458,20 @@ export class VmManager {
     this.#wasiServer = null;
   }
 
-  async #prepareDataDisk(distro: Distro, signal: AbortSignal): Promise<Uint8Array> {
+  async #prepareDataDisk(distro: Distro, signal: AbortSignal, mode: DiskMode): Promise<Uint8Array> {
     const { diskName, label, template } = DISTROS[distro];
     this.#onStatus({ phase: "disk-check", title: `检查 ${label} 持久化磁盘…` });
-    this.seededFromCache = await isDataDiskSeeded(diskName);
+    const probe = await probeDataDiskStore(diskName);
+    this.seededFromCache = probe.seeded;
     signal.throwIfAborted();
     let bytes: Uint8Array;
-    if (this.seededFromCache) {
+    if (!shouldDownloadTemplate(probe.seeded, probe.storedBytes, mode, SNAPSHOT_LIMIT_BYTES)) {
       bytes = kwsparseHeader(DISK_SIZE_BYTES, 4096, []);
     } else {
-      const title = `首次启动：正在加载 ${label} 的 Neovim 镜像…`;
+      const title =
+        mode === "snapshot"
+          ? `正在加载 ${label} 的 Neovim 镜像以启动内存快照…`
+          : `首次启动：正在加载 ${label} 的 Neovim 镜像…`;
       this.#onStatus({ phase: "disk-download", title, progress: 0 });
       let lastUpdate = performance.now();
       try {
@@ -449,24 +497,42 @@ export class VmManager {
     this.#onStatus({
       phase: "compile",
       title: "正在准备 Linux Wasm 内核…",
-      detail: this.seededFromCache ? `已找到 ${label} 持久化磁盘` : `${label} 数据盘已下载`,
+      detail:
+        mode === "snapshot"
+          ? (this.seededFromCache ? `将复制 ${label} 磁盘到内存副本` : `${label} 内存镜像已准备`)
+          : (this.seededFromCache ? `已找到 ${label} 持久化磁盘` : `${label} 数据盘已下载`),
     });
     return bytes;
   }
 
-  async boot(cols: number, rows: number, pixels: Pick<PtySize, "xpixel" | "ypixel"> = {}): Promise<TerminalSession[]> {
+  async boot(
+    cols: number,
+    rows: number,
+    pixels: Pick<PtySize, "xpixel" | "ypixel"> = {},
+    opts?: { diskMode?: DiskMode },
+  ): Promise<TerminalSession[]> {
     const distro = this.#distro;
-    const release = await acquireDiskLock(DISTROS[distro].diskName);
+    const mode =
+      opts?.diskMode ??
+      parseDiskModeParam(new URLSearchParams(location.search).get("disk")) ??
+      "persistent";
+    this.diskMode = mode;
+
+    const release = mode === "persistent" ? await acquireDiskLock(DISTROS[distro].diskName, distro) : () => {};
     let saved: SuspendedSession | undefined;
     try {
+      if (mode === "snapshot") {
+        await this.#boot(cols, rows, undefined, undefined, mode);
+        return [];
+      }
       saved = await readSuspendedSession(distro);
       if (!saved) {
-        await this.#boot(cols, rows);
+        await this.#boot(cols, rows, undefined, undefined, mode);
         return [];
       }
       this.#onStatus({ phase: "boot", title: "正在读取挂起会话…" });
       const snapshot = decodeSnapshot(new Uint8Array(await saved.snapshot.arrayBuffer()));
-      const vm = await this.#boot(cols, rows, snapshot, saved.network);
+      const vm = await this.#boot(cols, rows, snapshot, saved.network, mode);
       await deleteSuspendedSession(distro, saved.id).catch(() => {
         this.#onNotice?.("会话已恢复，但无法清除旧快照");
       });
@@ -529,6 +595,7 @@ export class VmManager {
     rows: number,
     restore?: KernelSnapshot,
     network = { mode: this.netMode, servers: this.getEffectiveWispServers() },
+    diskMode: DiskMode = "persistent",
   ): Promise<KernelHandle> {
     const distro = this.#distro;
     const { diskName, image, label } = DISTROS[distro];
@@ -550,7 +617,7 @@ export class VmManager {
     try {
       [kernel, templateBytes] = await Promise.all([
         loadKernelModule(bundledKernelUrl, { smp: cpus > 1, signal: loading.signal }),
-        this.#prepareDataDisk(distro, loading.signal),
+        this.#prepareDataDisk(distro, loading.signal, diskMode),
       ]);
     } catch (err) {
       loading.abort();
@@ -562,8 +629,9 @@ export class VmManager {
       name: diskName,
       version: DISK_VERSION,
       template: templateBytes,
-      mode: "persistent",
-      size: restore ? undefined : this.#configuredDiskSize(distro),
+      mode: diskMode,
+      ...(diskMode === "snapshot" ? { snapshotLimit: SNAPSHOT_LIMIT_BYTES } : {}),
+      size: restore || diskMode === "snapshot" ? undefined : this.#configuredDiskSize(distro),
     };
 
     const netSpec: NetSpec | undefined =
@@ -595,8 +663,13 @@ export class VmManager {
       } else if (p.stage === "start") {
         this.#onStatus({
           phase: "boot",
-          title: restore ? `正在恢复 ${label} 会话…` :
-            this.seededFromCache ? `正在挂载 ${label} 持久化磁盘…` : `正在初始化持久化磁盘并引导 ${label}…`,
+          title: restore
+            ? `正在恢复 ${label} 会话…`
+            : diskMode === "snapshot"
+              ? `正在以内存快照模式引导 ${label}…`
+              : this.seededFromCache
+                ? `正在挂载 ${label} 持久化磁盘…`
+                : `正在初始化持久化磁盘并引导 ${label}…`,
         });
       }
     };
@@ -1025,6 +1098,7 @@ export class VmManager {
   }
 
   async syncDisk(): Promise<boolean> {
+    if (this.isSnapshotMode) return true;
     if (!this.vm || this.#suspending) return false;
     return this.vm.sync({ timeout: 5000 }).catch(() => false);
   }
@@ -1033,7 +1107,9 @@ export class VmManager {
     if (!(this.vm instanceof WorkerKernel)) {
       throw new Error("内核未运行在 Worker 模式");
     }
-    if (!(await this.syncDisk())) throw new Error("磁盘同步未完成，请重试");
+    if (!this.isSnapshotMode && !(await this.syncDisk())) {
+      throw new Error("磁盘同步未完成，请重试");
+    }
     const { parts, blocks } = await this.vm.exportDisk(0);
     const blob = await gzipBlob(parts);
     const name = `unkernel-nvim-${this.activeDistro}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.kwsparse.gz`;
@@ -1048,6 +1124,9 @@ export class VmManager {
   }
 
   async importDiskImage(file: File): Promise<void> {
+    if (this.isSnapshotMode) {
+      throw new Error("内存快照模式下无法覆盖 IndexedDB 持久化磁盘");
+    }
     const bytes = await gunzipIfNeeded(await file.arrayBuffer());
     const { size, blockSize } = decodeKwsparse(bytes);
     if (blockSize !== 4096 || !Number.isSafeInteger(size) || size % blockSize !== 0 ||
@@ -1062,6 +1141,10 @@ export class VmManager {
   }
 
   async syncAndReload(): Promise<void> {
+    if (this.isSnapshotMode) {
+      location.reload();
+      return;
+    }
     await this.#stopForReload();
     location.reload();
   }
@@ -1088,6 +1171,9 @@ export class VmManager {
   }
 
   async resetToFactoryDisk(): Promise<void> {
+    if (this.isSnapshotMode) {
+      throw new Error("内存快照模式下无法重置持久化磁盘");
+    }
     this.#stopWasiServer();
     if (this.vm instanceof WorkerKernel) {
       await this.vm.detachDisk(0).catch(() => {});
@@ -1101,6 +1187,9 @@ export class VmManager {
 
   async suspendSession(): Promise<void> {
     const vm = this.vm;
+    if (this.isSnapshotMode) {
+      throw new Error("内存快照模式不支持挂起会话（更改不会写回 IndexedDB）");
+    }
     if (!(vm instanceof WorkerKernel) || !vm.disks[0]?.persistent || !this.#bootedNetwork) {
       throw new Error("挂起需要正在运行的虚拟机和持久化磁盘");
     }
@@ -1174,7 +1263,7 @@ export class VmManager {
   }
 
   async discardSuspendedSession(): Promise<void> {
-    const release = await acquireDiskLock(DISTROS[this.#distro].diskName);
+    const release = await acquireDiskLock(DISTROS[this.#distro].diskName, this.#distro);
     try {
       await deleteSuspendedSession(this.#distro);
     } finally {

@@ -764,6 +764,11 @@ body {
   background-color: #231917;
 }
 
+.modal-notice {
+  border-color: rgba(217, 119, 87, 0.45);
+  background-color: var(--clay-accent-dim);
+}
+
 .modal-danger .mini-btn {
   border-color: #8c4b42;
   background-color: #311e1a;

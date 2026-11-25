@@ -148,8 +148,9 @@ export class ModalController {
   }
 
   render(): void {
+    const modeTag = this.#vmManager.isSnapshotMode ? " · 内存快照（临时）" : "";
     this.#dialog.querySelector(".modal-subtitle")!.textContent =
-      `${DISTROS[this.#vmManager.activeDistro].label} aarch64 · DefectingCat/nvim`;
+      `${DISTROS[this.#vmManager.activeDistro].label} aarch64 · DefectingCat/nvim${modeTag}`;
     this.#renderWorkspace();
     this.#renderStorage();
     this.#renderSystem();
@@ -335,14 +336,24 @@ export class ModalController {
   #renderStorage(): void {
     const panel = this.#panel("storage");
     const distro = DISTROS[this.#vmManager.activeDistro].label;
-    const { diskSize, targetDiskSize } = this.#vmManager;
+    const { diskSize, targetDiskSize, isSnapshotMode, diskNotice } = this.#vmManager;
     panel.innerHTML = `
+      ${
+        isSnapshotMode
+          ? `<div class="row-bar modal-notice" role="status">
+              <div class="row-label-group">
+                <span class="row-label">当前处于内存快照模式（临时副本）</span>
+                <span class="row-hint">${escapeHtml(diskNotice ? `内核说明：${diskNotice}。` : "")}所有文件修改仅保留在浏览器内存中，不会写回 IndexedDB，仍可导出 .kwsparse.gz 备份。</span>
+              </div>
+            </div>`
+          : ""
+      }
       <div class="modal-section">
-        <h3 class="modal-section-title">${distro} 持久化磁盘</h3>
+        <h3 class="modal-section-title">${distro} ${isSnapshotMode ? "内存快照磁盘" : "持久化磁盘"}</h3>
         <form class="row-bar" id="form-disk-size">
           <div class="row-label-group">
             <label class="row-label" for="input-disk-gib">数据盘容量</label>
-            <span class="row-hint" id="disk-size-hint">当前 ${formatDiskGiB(diskSize)}${diskSize < targetDiskSize ? ` · 下次启动 ${formatDiskGiB(targetDiskSize)}` : " · 按实际写入占用浏览器存储"}</span>
+            <span class="row-hint" id="disk-size-hint">当前 ${formatDiskGiB(diskSize)}${!isSnapshotMode && diskSize < targetDiskSize ? ` · 下次启动 ${formatDiskGiB(targetDiskSize)}` : isSnapshotMode ? " · 内存副本不可扩容" : " · 按实际写入占用浏览器存储"}</span>
           </div>
           <div class="row-controls row-input-controls">
             <input class="text-input" id="input-disk-gib" aria-describedby="disk-size-hint" type="number" inputmode="numeric"
@@ -354,7 +365,7 @@ export class ModalController {
         <div class="modal-grid">
           <button class="modal-btn" id="btn-sync-disk" type="button">
             <span>立即同步落盘 (Sync)</span>
-            <span class="modal-btn-desc">将文件修改刷新到 IndexedDB</span>
+            <span class="modal-btn-desc">${isSnapshotMode ? "内存快照模式不写入 IndexedDB" : "将文件修改刷新到 IndexedDB"}</span>
           </button>
           <button class="modal-btn" id="btn-export-disk" type="button">
             <span>导出磁盘备份 (.kwsparse.gz)</span>
@@ -366,7 +377,7 @@ export class ModalController {
           </button>
           <button class="modal-btn" id="btn-suspend-session" type="button">
             <span>挂起会话</span>
-            <span class="modal-btn-desc">保存虚拟机内存与终端，稍后恢复</span>
+            <span class="modal-btn-desc">${isSnapshotMode ? "内存快照模式不支持挂起" : "保存虚拟机内存与终端，稍后恢复"}</span>
           </button>
         </div>
         <input type="file" id="input-import-disk" accept=".gz,.kwsparse" hidden />
@@ -374,7 +385,7 @@ export class ModalController {
       <div class="row-bar modal-danger">
         <div class="row-label-group">
           <span class="row-label">恢复出厂镜像</span>
-          <span class="row-hint">清空浏览器内的磁盘改动，还原初始系统。</span>
+          <span class="row-hint">${isSnapshotMode ? "请关闭其他标签页并以持久化模式启动后再重置。" : "清空浏览器内的磁盘改动，还原初始系统。"}</span>
         </div>
         <button class="mini-btn" id="btn-reset-disk" type="button">恢复出厂镜像…</button>
       </div>
@@ -849,14 +860,21 @@ export class ModalController {
       this.#vmManager.hasPendingNetworkChange() ? "Wisp 网络" : null,
       this.#vmManager.hasPendingDiskSizeChange() ? "数据盘容量" : null,
     ].filter(Boolean).join("、");
-    message.textContent = restarting ? "正在同步持久化磁盘…" : `${settings}将在重启后生效`;
+    message.textContent = restarting
+      ? (this.#vmManager.isSnapshotMode ? "正在重新加载…" : "正在同步持久化磁盘…")
+      : `${settings}将在重启后生效`;
     button.disabled = this.#diskAction !== null;
-    button.textContent = restarting ? "正在重启…" : "同步并重启";
+    button.textContent = restarting
+      ? "正在重启…"
+      : (this.#vmManager.isSnapshotMode ? "重新加载" : "同步并重启");
   }
 
   #updateStorageButtons(): void {
+    const busyOrNoVm = this.#diskAction !== null || !this.#vmManager.vm;
+    const snapshotMode = this.#vmManager.isSnapshotMode;
     for (const control of this.#panel("storage").querySelectorAll<HTMLButtonElement | HTMLInputElement>("button, input")) {
-      control.disabled = this.#diskAction !== null || !this.#vmManager.vm;
+      const keepInSnapshot = control.id === "btn-export-disk";
+      control.disabled = busyOrNoVm || (snapshotMode && !keepInSnapshot);
     }
   }
 

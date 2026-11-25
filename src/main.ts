@@ -2,6 +2,7 @@
 // Application entry point: wires the fullscreen WebGL2 Canvas terminal,
 // WorkerKernel VM manager, boot progress overlay, and modal control center.
 
+import { type DiskMode } from "./disk-config.ts";
 import { DISTROS } from "./distro.ts";
 import { pickHostDirectory } from "./fs-bridge.ts";
 import { GuestPreview } from "./guest-preview.ts";
@@ -15,7 +16,7 @@ import { ModalController } from "./modal.ts";
 import { ResumeSessionError } from "./suspended-session.ts";
 import { CanvasTerminal, SHELL_SCROLLBACK_LINES } from "./terminal.ts";
 import { cycleSessionId, MAX_TERMINAL_SESSIONS, type SessionMode } from "./terminal-sessions.ts";
-import { VmManager, type BootStatusUpdate, type TerminalSession } from "./vm-manager.ts";
+import { DiskLockError, VmManager, type BootStatusUpdate, type TerminalSession } from "./vm-manager.ts";
 
 const stageEl = document.getElementById("terminal-stage")!;
 const bootOverlayEl = document.getElementById("boot-overlay")!;
@@ -24,6 +25,7 @@ const bootDetailEl = document.getElementById("boot-detail")!;
 const bootBarFillEl = document.getElementById("boot-bar-fill")!;
 const bootBadgeEl = document.getElementById("boot-mode-badge")!;
 const bootActionsEl = document.getElementById("boot-actions")!;
+const snapshotBootButton = document.querySelector<HTMLButtonElement>("#btn-boot-snapshot")!;
 const resumeButton = document.querySelector<HTMLButtonElement>("#btn-resume-session")!;
 const discardButton = document.querySelector<HTMLButtonElement>("#btn-discard-session")!;
 const sessionTabsEl = document.getElementById("session-tabs")!;
@@ -97,10 +99,11 @@ let togglingQuickSession = false;
 
 function renderSessionHud(): void {
   const active = vmManager.activeSession;
+  const snapshotSuffix = vmManager.isSnapshotMode ? " · 快照" : "";
   if (!active) {
-    pillLabelEl.textContent = "空闲";
+    pillLabelEl.textContent = `空闲${snapshotSuffix}`;
   } else {
-    pillLabelEl.textContent = active.exited ? `${active.title} (exited)` : active.title;
+    pillLabelEl.textContent = active.exited ? `${active.title} (exited)${snapshotSuffix}` : `${active.title}${snapshotSuffix}`;
   }
 
   sessionTabsEl.replaceChildren();
@@ -302,6 +305,10 @@ vmManager.setCommands(
   }),
 );
 
+snapshotBootButton.addEventListener("click", () => {
+  snapshotBootButton.disabled = true;
+  void bootApp("snapshot");
+});
 resumeButton.addEventListener("click", () => location.reload());
 discardButton.addEventListener("click", async () => {
   if (!confirm("确定放弃挂起的会话并启动新会话吗？已落盘的文件会保留。")) return;
@@ -327,7 +334,18 @@ modal = new ModalController({
   toast: showToast,
 });
 
-async function bootApp(): Promise<void> {
+async function bootApp(diskMode?: DiskMode): Promise<void> {
+  bootOverlayEl.classList.remove("fade-out");
+  bootBarFillEl.classList.add("indeterminate");
+  bootBarFillEl.style.width = "";
+  bootBarFillEl.style.backgroundColor = "";
+  bootActionsEl.hidden = true;
+  snapshotBootButton.hidden = true;
+  snapshotBootButton.disabled = false;
+  discardButton.hidden = true;
+  resumeButton.textContent = "恢复会话";
+  resumeButton.classList.add("active");
+
   try {
     bootDetailEl.textContent = `${DISTROS[vmManager.distro].label} · DefectingCat/nvim`;
     bootBadgeEl.textContent = globalThis.crossOriginIsolated
@@ -335,7 +353,10 @@ async function bootApp(): Promise<void> {
       : "aarch64 · Worker";
 
     const size = terminal.getSize();
-    const restored = await vmManager.boot(size.cols, size.rows, size);
+    const restored = await vmManager.boot(size.cols, size.rows, size, { diskMode });
+    if (vmManager.isSnapshotMode) {
+      bootBadgeEl.textContent = `${bootBadgeEl.textContent} · 内存快照`;
+    }
     if (restored.length > 0) {
       for (const session of restored) {
         mountSession(session, session.id === vmManager.activeSessionId);
@@ -346,6 +367,15 @@ async function bootApp(): Promise<void> {
       renderSessionHud();
     } else {
       await openNewSession("nvim", { cwd: "/workspace" });
+    }
+    if (vmManager.isSnapshotMode) {
+      const notice = vmManager.diskNotice;
+      showToast(
+        notice
+          ? `已进入内存快照模式（临时副本，不写回 IndexedDB：${notice}）`
+          : "已进入内存快照模式（临时副本，更改不会写回 IndexedDB）",
+        6000,
+      );
     }
     if (vmManager.didMemoryFallback()) {
       const diag = vmManager.getStats();
@@ -358,6 +388,19 @@ async function bootApp(): Promise<void> {
     bootBarFillEl.classList.remove("indeterminate");
     bootBarFillEl.style.width = "100%";
     bootBarFillEl.style.backgroundColor = "#c95646";
+    if (err instanceof DiskLockError) {
+      bootTitleEl.textContent = "持久化磁盘已在其他标签页打开";
+      bootDetailEl.textContent =
+        "另一标签页正独占写入 IndexedDB 磁盘。你可以启动基于当前磁盘拷贝的内存快照副本（仅当前标签页有效，不写回 IndexedDB），或关闭其他标签页后重试。";
+      bootActionsEl.hidden = false;
+      snapshotBootButton.hidden = false;
+      resumeButton.textContent = "重试持久化启动";
+      resumeButton.classList.remove("active");
+      discardButton.hidden = true;
+      snapshotBootButton.focus();
+      console.warn(err);
+      return;
+    }
     bootTitleEl.textContent = err instanceof ResumeSessionError ? "恢复会话失败" : "启动失败";
     bootDetailEl.textContent = (err as Error)?.message ?? String(err);
     if (err instanceof ResumeSessionError) {
