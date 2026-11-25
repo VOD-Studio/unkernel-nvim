@@ -4,6 +4,7 @@
 // font sizing, disk persistence/export/import/reset, and runtime diagnostics.
 
 import { formatDiskGiB, GIB, MAX_DISK_GIB, parseDiskGiB } from "./disk-config.ts";
+import { formatByteSize } from "./diagnostics.ts";
 import { DISTROS, isDistro } from "./distro.ts";
 import { isDirectoryPickerSupported, pickHostDirectory } from "./fs-bridge.ts";
 import {
@@ -61,6 +62,10 @@ export class ModalController {
   #customMemoryOpen = false;
   #startingSession = false;
   #diskAction: DiskAction | null = null;
+  #logsImportantOnly = false;
+  #overlayOutput = "";
+  #overlayPendingRestart = false;
+  #systemStatsTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(opts: ModalControllerOptions) {
     this.#backdrop = opts.backdrop;
@@ -142,6 +147,7 @@ export class ModalController {
     if (!this.#open) return;
     this.#open = false;
     this.#customMemoryOpen = false;
+    this.#stopSystemStatsTimer();
     this.#backdrop.classList.add("hidden");
     this.#dialog.querySelector("#modal-feedback")!.textContent = "";
     this.#terminal.focus();
@@ -166,6 +172,11 @@ export class ModalController {
 
   #selectTab(tab: ModalTab): void {
     this.#tab = tab;
+    if (tab === "system" && this.#open) {
+      this.#startSystemStatsTimer();
+    } else {
+      this.#stopSystemStatsTimer();
+    }
     for (const candidate of MODAL_TABS) {
       const selected = candidate === tab;
       const button = this.#tabButton(candidate);
@@ -174,6 +185,21 @@ export class ModalController {
       this.#panel(candidate).hidden = !selected;
     }
     this.#tabButton(tab).focus();
+  }
+
+  #startSystemStatsTimer(): void {
+    this.#stopSystemStatsTimer();
+    this.#systemStatsTimer = setInterval(() => {
+      if (!this.#open || this.#tab !== "system") return;
+      this.#refreshLiveSystemStats();
+    }, 1500);
+  }
+
+  #stopSystemStatsTimer(): void {
+    if (this.#systemStatsTimer !== null) {
+      clearInterval(this.#systemStatsTimer);
+      this.#systemStatsTimer = null;
+    }
   }
 
   #onTabKey(e: KeyboardEvent, tab: ModalTab): void {
@@ -408,6 +434,12 @@ export class ModalController {
     const panel = this.#panel("system");
     const diag = this.#vmManager.getStats();
     const jit = diag.stats?.jit;
+    const block = diag.stats?.block;
+    const net = diag.stats?.net;
+    const kwBase = this.#vmManager.kwBaseInfo;
+    const logs = this.#vmManager.getKernelLogs();
+    const importantLogCount = logs.filter((entry) => entry.important).length;
+    const visibleLogs = this.#logsImportantOnly ? logs.filter((entry) => entry.important) : logs;
     const diskMiB = ((diag.diskBlocks * 4096) / 1048576).toFixed(1);
     const { cpuCount, cpuLimit, cpuBlocker } = this.#vmManager;
     const { activeDistro, distro } = this.#vmManager;
@@ -443,7 +475,34 @@ export class ModalController {
       memoryHint = `已分配 ${diag.memoryMiB} MiB`;
     }
 
+    const blockValue = block
+      ? `读 ${formatByteSize(block.bytesRead)} / 写 ${formatByteSize(block.bytesWritten)}`
+      : "—";
+    const blockDetail = block
+      ? `${block.reads} 读 · ${block.writes} 写 · ${block.flushes} 刷盘`
+      : "暂无 I/O 统计";
+    const netValue = net ? `收 ${net.rx} 帧 / 发 ${net.tx} 帧` : "离线";
+    const netDetail = net ? `TCP ${net.tcpOpened} · DNS ${net.dns}` : "未启用网络";
+    const wasiValue = `${diag.wasi.runs} 次运行 · ${diag.wasi.cachedModules} 缓存`;
+    const wasiDetail = diag.wasi.active
+      ? (diag.wasi.shared ? "共享内存 Worker" : "标准 Worker")
+      : "未启用";
+
     panel.innerHTML = `
+      ${
+        kwBase?.safeMode
+          ? `<div class="row-bar modal-danger" role="alert">
+              <div class="row-label-group">
+                <span class="row-label">系统已进入 Safe Mode（安全模式）</span>
+                <span class="row-hint">${escapeHtml(kwBase.why || "Overlay 异常回退，持久化修改暂未挂载。")}</span>
+              </div>
+              <div class="row-controls">
+                <button class="mini-btn" id="btn-safe-overlay-status" type="button">查看 status</button>
+                <button class="mini-btn" id="btn-safe-overlay-discard" type="button" ${this.#vmManager.isSnapshotMode ? "disabled" : ""}>重置 Overlay (discard)</button>
+              </div>
+            </div>`
+          : ""
+      }
       <div class="modal-section">
         <h3 class="modal-section-title">运行时性能与诊断</h3>
         <div class="stats-grid">
@@ -458,14 +517,73 @@ export class ModalController {
           <div class="stat-box">
             <div class="stat-key">虚拟机 CPU / 内存</div>
             <div class="stat-val"><span id="stat-cpus">${cpuLabel}</span> · ${diag.memoryMiB} MiB${diag.memoryFallback ? " · 回退" : ""}</div>
-            <div class="stat-detail">${jit ? `${jit.compiled} 块已编译` : "JIT 已启用"}</div>
+            <div class="stat-detail" id="stat-jit">${jit ? `${jit.compiled} 块已编译` : "JIT 已启用"}</div>
           </div>
           <div class="stat-box">
-            <div class="stat-key">持久化存储占用</div>
+            <div class="stat-key">${this.#vmManager.isSnapshotMode ? "内存快照占用" : "持久化存储占用"}</div>
             <div class="stat-val" id="stat-disk-size">${diskMiB} MiB</div>
             <div class="stat-detail" id="stat-disk-blocks">${diag.diskBlocks} 块</div>
           </div>
+          <div class="stat-box">
+            <div class="stat-key">块设备 I/O (Block)</div>
+            <div class="stat-val" id="stat-block-io">${escapeHtml(blockValue)}</div>
+            <div class="stat-detail" id="stat-block-ops">${escapeHtml(blockDetail)}</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-key">网络统计 (Net)</div>
+            <div class="stat-val" id="stat-net-io">${escapeHtml(netValue)}</div>
+            <div class="stat-detail" id="stat-net-ops">${escapeHtml(netDetail)}</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-key">WASI 宿主加速</div>
+            <div class="stat-val" id="stat-wasi-runs">${escapeHtml(wasiValue)}</div>
+            <div class="stat-detail" id="stat-wasi-mode">${escapeHtml(wasiDetail)}</div>
+          </div>
         </div>
+      </div>
+      <div class="modal-section">
+        <h3 class="modal-section-title">Overlay 与安全模式 (kw-overlay)</h3>
+        <div class="row-bar">
+          <div class="row-label-group">
+            <span class="row-label">根文件系统状态</span>
+            <span class="row-hint">${
+              kwBase
+                ? `distro=${escapeHtml(kwBase.name || activeDistro)} · upper=${escapeHtml(kwBase.upper || "none")}${kwBase.why ? ` · ${escapeHtml(kwBase.why)}` : ""}`
+                : "正在读取 /run/kw-base…"
+            }</span>
+          </div>
+          <div class="row-controls">
+            <button class="mini-btn" id="btn-overlay-status" type="button">kw-overlay status</button>
+            <button class="mini-btn" id="btn-overlay-discard" type="button" ${this.#vmManager.isSnapshotMode ? "disabled" : ""}>重置 Overlay</button>
+          </div>
+        </div>
+        ${
+          this.#overlayOutput
+            ? `<pre class="diag-output" id="overlay-output">${escapeHtml(this.#overlayOutput)}</pre>`
+            : ""
+        }
+      </div>
+      <div class="modal-section">
+        <h3 class="modal-section-title">内核日志 (ConsoleRouter · ${logs.length} 条 / ${importantLogCount} 条警告)</h3>
+        <div class="row-bar">
+          <span class="row-label">内核与启动输出</span>
+          <div class="row-controls">
+            <button class="mini-btn" id="btn-logs-filter" aria-pressed="${this.#logsImportantOnly}" type="button">${this.#logsImportantOnly ? "仅警告" : "全部"}</button>
+            <button class="mini-btn" id="btn-logs-refresh" type="button">刷新</button>
+            <button class="mini-btn" id="btn-logs-copy" type="button" ${visibleLogs.length === 0 ? "disabled" : ""}>复制日志</button>
+            <button class="mini-btn" id="btn-logs-clear" type="button" ${logs.length === 0 ? "disabled" : ""}>清空</button>
+          </div>
+        </div>
+        <div class="kernel-log-view" id="kernel-log-view" role="log" aria-live="off">${
+          visibleLogs.length > 0
+            ? visibleLogs
+                .map(
+                  (entry) =>
+                    `<div class="kernel-log-line${entry.important ? " important" : ""}">${escapeHtml(entry.line)}</div>`,
+                )
+                .join("")
+            : `<div class="kernel-log-empty">${this.#logsImportantOnly ? "暂无重要内核警告" : "暂无内核日志记录"}</div>`
+        }</div>
       </div>
       <div class="modal-section">
         <h3 class="modal-section-title">虚拟机配置</h3>
@@ -845,6 +963,92 @@ export class ModalController {
         saveWisp();
       });
     }
+
+    const showOverlayStatus = async () => {
+      try {
+        this.#toast("正在查询 kw-overlay status…");
+        this.#overlayOutput = await this.#vmManager.runKwOverlayStatus();
+        await this.#vmManager.refreshKwBase();
+        this.#renderSystem();
+      } catch (err) {
+        this.#toast(`查询失败: ${(err as Error)?.message ?? String(err)}`);
+      }
+    };
+
+    const runOverlayDiscard = async () => {
+      if (!confirm("确定重置当前发行版的 Overlay 改动？旧修改将被归档并从基础镜像重新启动。")) return;
+      try {
+        this.#toast("正在执行 kw-overlay discard…");
+        this.#overlayOutput = await this.#vmManager.runKwOverlayDiscard();
+        this.#overlayPendingRestart = true;
+        await this.#vmManager.refreshKwBase();
+        this.#renderSystem();
+        this.#toast("已重置 Overlay，请同步并重启生效");
+      } catch (err) {
+        this.#toast(`重置失败: ${(err as Error)?.message ?? String(err)}`);
+      }
+    };
+
+    q<HTMLButtonElement>("#btn-overlay-status")?.addEventListener("click", () => void showOverlayStatus());
+    q<HTMLButtonElement>("#btn-safe-overlay-status")?.addEventListener("click", () => void showOverlayStatus());
+    q<HTMLButtonElement>("#btn-overlay-discard")?.addEventListener("click", () => void runOverlayDiscard());
+    q<HTMLButtonElement>("#btn-safe-overlay-discard")?.addEventListener("click", () => void runOverlayDiscard());
+
+    q<HTMLButtonElement>("#btn-logs-filter")?.addEventListener("click", () => {
+      this.#logsImportantOnly = !this.#logsImportantOnly;
+      this.#renderSystem();
+      q<HTMLButtonElement>("#btn-logs-filter")?.focus();
+    });
+    q<HTMLButtonElement>("#btn-logs-refresh")?.addEventListener("click", () => {
+      this.#renderSystem();
+      q<HTMLButtonElement>("#btn-logs-refresh")?.focus();
+    });
+    q<HTMLButtonElement>("#btn-logs-copy")?.addEventListener("click", async () => {
+      const text = this.#vmManager.formatKernelLogs(this.#logsImportantOnly);
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        this.#toast("已复制内核日志到剪贴板");
+      } catch {
+        this.#toast("无法写入剪贴板，请手动选中复制");
+      }
+    });
+    q<HTMLButtonElement>("#btn-logs-clear")?.addEventListener("click", () => {
+      this.#vmManager.clearKernelLogs();
+      this.#renderSystem();
+      q<HTMLButtonElement>("#btn-logs-clear")?.focus();
+    });
+  }
+
+  #refreshLiveSystemStats(): void {
+    const panel = this.#panel("system");
+    const diag = this.#vmManager.getStats();
+    const jit = diag.stats?.jit;
+    const block = diag.stats?.block;
+    const net = diag.stats?.net;
+    const setText = (sel: string, val: string) => {
+      const el = panel.querySelector(sel);
+      if (el) el.textContent = val;
+    };
+    setText("#stat-cpus", diag.cpus === null ? "—" : `${diag.cpus} 核`);
+    setText("#stat-jit", jit ? `${jit.compiled} 块已编译` : "JIT 已启用");
+    setText("#stat-disk-size", `${((diag.diskBlocks * 4096) / 1048576).toFixed(1)} MiB`);
+    setText("#stat-disk-blocks", `${diag.diskBlocks} 块`);
+    setText(
+      "#stat-block-io",
+      block ? `读 ${formatByteSize(block.bytesRead)} / 写 ${formatByteSize(block.bytesWritten)}` : "—",
+    );
+    setText(
+      "#stat-block-ops",
+      block ? `${block.reads} 读 · ${block.writes} 写 · ${block.flushes} 刷盘` : "暂无 I/O 统计",
+    );
+    setText("#stat-net-io", net ? `收 ${net.rx} 帧 / 发 ${net.tx} 帧` : "离线");
+    setText("#stat-net-ops", net ? `TCP ${net.tcpOpened} · DNS ${net.dns}` : "未启用网络");
+    setText("#stat-wasi-runs", `${diag.wasi.runs} 次运行 · ${diag.wasi.cachedModules} 缓存`);
+    setText(
+      "#stat-wasi-mode",
+      diag.wasi.active ? (diag.wasi.shared ? "共享内存 Worker" : "标准 Worker") : "未启用",
+    );
   }
 
   #setMemoryConfig(next: MemoryConfigMiB): void {
@@ -859,7 +1063,7 @@ export class ModalController {
     const message = banner.querySelector("#modal-restart-message")!;
     const button = banner.querySelector<HTMLButtonElement>("#btn-apply-restart")!;
     const restarting = this.#diskAction === "restart";
-    banner.hidden = !restarting && !this.#vmManager.hasPendingRestartChanges();
+    banner.hidden = !restarting && !this.#overlayPendingRestart && !this.#vmManager.hasPendingRestartChanges();
     if (banner.hidden) {
       message.textContent = "";
       return;
@@ -870,6 +1074,7 @@ export class ModalController {
       this.#vmManager.hasPendingMemoryChange() ? "内存配额" : null,
       this.#vmManager.hasPendingNetworkChange() ? "Wisp 网络" : null,
       this.#vmManager.hasPendingDiskSizeChange() ? "数据盘容量" : null,
+      this.#overlayPendingRestart ? "Overlay 重置" : null,
     ].filter(Boolean).join("、");
     message.textContent = restarting
       ? (this.#vmManager.isSnapshotMode ? "正在重新加载…" : "正在同步持久化磁盘…")

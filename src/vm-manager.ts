@@ -6,6 +6,7 @@ import {
   autoMemoryMiB,
   bundledKernelUrl,
   checkSupport,
+  ConsoleRouter,
   createKernel,
   decodeKwsparse,
   decodeSnapshot,
@@ -39,6 +40,12 @@ import {
   type WasiExecServer,
 } from "unkernel";
 import { DEFAULT_DISTRO, DISTROS, isDistro, releaseGuestAssetPath, type Distro } from "./distro.ts";
+import {
+  KernelLogBuffer,
+  parseKwBase,
+  type KernelLogEntry,
+  type KwBaseInfo,
+} from "./diagnostics.ts";
 import {
   DEFAULT_DISK_GIB,
   GIB,
@@ -264,6 +271,10 @@ export class VmManager {
   diskMode: DiskMode = "persistent";
   #lastDiskError: DiskErrorInfo | null = null;
   #lastDiskErrorToastAt = 0;
+  #kernelLogs = new KernelLogBuffer();
+  #consoleRouter: ConsoleRouter | null = null;
+  #kwBaseInfo: KwBaseInfo | null = null;
+  #lastKernelAlertAt = 0;
 
   get isSnapshotMode(): boolean {
     return this.diskMode === "snapshot";
@@ -275,6 +286,22 @@ export class VmManager {
 
   get lastDiskError(): DiskErrorInfo | null {
     return this.#lastDiskError;
+  }
+
+  get kwBaseInfo(): KwBaseInfo | null {
+    return this.#kwBaseInfo;
+  }
+
+  getKernelLogs(): readonly KernelLogEntry[] {
+    return this.#kernelLogs.entries();
+  }
+
+  clearKernelLogs(): void {
+    this.#kernelLogs.clear();
+  }
+
+  formatKernelLogs(importantOnly = false): string {
+    return this.#kernelLogs.format(importantOnly);
   }
 
   get sessions(): readonly TerminalSession[] {
@@ -773,6 +800,39 @@ export class VmManager {
     this.memoryRequestedMiB = null;
     this.memoryAllocatedMiB = null;
     this.memoryFallbackReasons = [];
+    this.#kernelLogs.clear();
+    this.#kwBaseInfo = null;
+    let userLineRemainder = "";
+    this.#consoleRouter = new ConsoleRouter({
+      onKernelLine: (line, info) => {
+        this.#kernelLogs.push({
+          time: info.time,
+          line,
+          important: info.important,
+          source: "kernel",
+        });
+        if (info.important && this.vm && Date.now() - this.#lastKernelAlertAt >= 5000) {
+          this.#lastKernelAlertAt = Date.now();
+          this.#onNotice?.(`内核警告：${line}`, 6000);
+        }
+      },
+      onUserOutput: (text) => {
+        userLineRemainder += text;
+        const lines = userLineRemainder.split(/\r?\n/);
+        userLineRemainder = lines.pop() ?? "";
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (line.includes("kw-overlay:")) {
+            this.#kernelLogs.push({
+              time: 0,
+              line,
+              important: /safe mode|cannot|error/i.test(line),
+              source: "overlay",
+            });
+          }
+        }
+      },
+    });
 
     const vm = await createKernel({
       kernel,
@@ -789,6 +849,7 @@ export class VmManager {
       consoleSize: { cols, rows },
       disks: [diskSpec],
       net: netSpec,
+      onOutput: (bytes) => this.#consoleRouter?.write(bytes),
       onDiskError: (_index, error) => this.#handleDiskError(error),
       onProgress,
       log: (m) => console.debug(m),
@@ -810,6 +871,14 @@ export class VmManager {
     this.#shellPath = null;
     this.#shellProbe = null;
     void this.#resolveShell(vm);
+    void this.refreshKwBase(vm).then((info) => {
+      if (this.vm === vm && info?.safeMode) {
+        this.#onNotice?.(
+          `系统已进入安全模式（${info.why || "overlay 回退"}），可在控制中心「虚拟机与诊断」查看或重置 Overlay。`,
+          8000,
+        );
+      }
+    });
 
     if (cpus > 1) {
       void vm.exec("/usr/bin/nproc", [], { signal: AbortSignal.timeout(2000) }).then((result) => {
@@ -878,28 +947,69 @@ export class VmManager {
     }
   }
 
-  async #readBaseShellReason(vm: KernelHandle): Promise<string | null> {
+  async refreshKwBase(vm: KernelHandle | null = this.vm): Promise<KwBaseInfo | null> {
+    if (!vm) return null;
     try {
       const res = await vm.exec("/bin/sh", ["-c", "cat /run/kw-base"], {
         user: "root",
         signal: AbortSignal.timeout(1500),
       });
       if (res.exitCode !== 0) return null;
-      let upper = "";
-      let why = "";
-      for (const line of res.stdout.split("\n")) {
-        const eq = line.indexOf("=");
-        if (eq === -1) continue;
-        const key = line.slice(0, eq).trim();
-        const val = line.slice(eq + 1).trim();
-        if (key === "upper") upper = val;
-        else if (key === "why") why = val;
+      const info = parseKwBase(res.stdout);
+      if (this.vm === vm) {
+        this.#kwBaseInfo = info;
       }
-      if (upper === "none") return why || "回退到了基础 initramfs";
-      return null;
+      return info;
     } catch {
       return null;
     }
+  }
+
+  async runKwOverlayStatus(): Promise<string> {
+    if (!this.vm || this.#suspending) throw new Error("虚拟机尚未就绪");
+    const res = await this.vm.exec(
+      "/bin/sh",
+      ["-c", "if [ -x /usr/sbin/kw-overlay ]; then /usr/sbin/kw-overlay status; else kw-overlay status; fi"],
+      { user: "root", signal: AbortSignal.timeout(5000) },
+    );
+    const out = [res.stdout.trim(), res.stderr.trim()].filter(Boolean).join("\n");
+    if (res.exitCode !== 0 && !out) {
+      throw new Error(`kw-overlay status 失败 (exit=${res.exitCode})`);
+    }
+    return out || "(无输出)";
+  }
+
+  async runKwOverlayDiscard(): Promise<string> {
+    if (!this.vm || this.#suspending) throw new Error("虚拟机尚未就绪");
+    if (this.isSnapshotMode) {
+      throw new Error("内存快照模式下不支持重置持久化 Overlay");
+    }
+    const name = this.#kwBaseInfo?.name || this.activeDistro;
+    const res = await this.vm.exec(
+      "/bin/sh",
+      [
+        "-c",
+        'if [ -x /usr/sbin/kw-overlay ]; then /usr/sbin/kw-overlay discard "$1"; else kw-overlay discard "$1"; fi',
+        "--",
+        name,
+      ],
+      { user: "root", signal: AbortSignal.timeout(8000) },
+    );
+    const out = [res.stdout.trim(), res.stderr.trim()].filter(Boolean).join("\n");
+    if (res.exitCode !== 0) {
+      throw new Error(out || `kw-overlay discard 失败 (exit=${res.exitCode})`);
+    }
+    await this.syncDisk();
+    return out || "已标记重置 Overlay，下次重启生效。";
+  }
+
+  async #readBaseShellReason(vm: KernelHandle): Promise<string | null> {
+    const info = await this.refreshKwBase(vm);
+    if (!info) return null;
+    if (info.upper === "none" || info.safeMode) {
+      return info.why || "回退到了基础 initramfs";
+    }
+    return null;
   }
 
   async startSession(

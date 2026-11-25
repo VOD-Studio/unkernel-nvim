@@ -866,6 +866,51 @@ body {
   user-select: text;
 }
 
+.diag-output {
+  margin: 8px 0 0;
+  padding: 9px 11px;
+  max-height: 150px;
+  overflow: auto;
+  background-color: var(--clay-sidebar);
+  border: 1px solid var(--clay-border);
+  border-radius: 6px;
+  color: var(--clay-fg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.kernel-log-view {
+  margin: 8px 0 0;
+  padding: 9px 11px;
+  max-height: 200px;
+  overflow: auto;
+  background-color: var(--clay-sidebar);
+  border: 1px solid var(--clay-border);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.kernel-log-line {
+  color: var(--clay-secondary);
+}
+
+.kernel-log-line.important {
+  color: #f0a399;
+}
+
+.kernel-log-empty {
+  color: var(--clay-muted);
+}
+
 @media (max-width: 560px) {
   .modal-backdrop {
     padding: 12px;
