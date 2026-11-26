@@ -40,6 +40,7 @@ import {
   type PtySize,
   type WasiExecServer,
 } from "unkernel";
+import { BackgroundSuspend, backgroundSuspendEnabled, holdUntilShown } from "./background-suspend.ts";
 import { installDebianTools } from "./debian-tools.ts";
 import { DEFAULT_DISTRO, DISTROS, isDistro, releaseGuestAssetPath, type Distro } from "./distro.ts";
 import {
@@ -116,6 +117,7 @@ const DISK_VERSION = "v2"; // aarch64 + unkernel 0.2.0 distro overlay layout
 const DISK_SIZE_BYTES = DEFAULT_DISK_GIB * GIB;
 const CPU_STORAGE_KEY = "unkernel-nvim.cpus";
 const DISTRO_STORAGE_KEY = "unkernel-nvim.distro";
+const AUTO_SUSPEND_KEY = "unkernel-nvim.autoSuspend";
 const MAX_CPUS = 16; // CONFIG_NR_CPUS in the upstream SMP kernel
 
 export class DiskLockError extends Error {
@@ -244,6 +246,18 @@ export class VmManager {
   #bootCpuCount: number | null = null;
   #onlineCpuCount: number | null = null;
   #suspending = false;
+  #reloading = false;
+  #terminalsReady = false;
+  #background = new BackgroundSuspend({
+    canSuspend: () => this.#sessions.some((s) => s.pty && !s.exited) && !this.#suspendBlocker(),
+    suspend: (shown) => this.#saveSession(shown),
+    syncDisk: () => this.syncDisk(),
+    restore: () => location.reload(),
+    onError: (error) => {
+      console.warn("[auto-suspend] 后台快照保存失败", error);
+      this.#onNotice?.(`未能保存后台会话（${error instanceof Error ? error.message : String(error)}）`, 6000);
+    },
+  });
   #shellPath: string | null = null;
   #shellProbe: Promise<string | null> | null = null;
   #commands?: CommandsOption;
@@ -268,6 +282,27 @@ export class VmManager {
 
   get isSnapshotMode(): boolean {
     return this.diskMode === "snapshot";
+  }
+
+  get autoSuspendEnabled(): boolean {
+    return backgroundSuspendEnabled(localStorage.getItem(AUTO_SUSPEND_KEY), navigator);
+  }
+
+  setAutoSuspendEnabled(enabled: boolean): void {
+    localStorage.setItem(AUTO_SUSPEND_KEY, enabled ? "1" : "0");
+    this.updatePageVisibility();
+  }
+
+  updatePageVisibility(hidden = document.hidden): void {
+    void this.#background.update(hidden, this.#terminalsReady && this.autoSuspendEnabled);
+  }
+
+  #reportReady(): void {
+    this.#onStatus({ phase: "ready", title: "Ready" });
+    if (!this.#terminalsReady) {
+      this.#terminalsReady = true;
+      this.updatePageVisibility();
+    }
   }
 
   get diskNotice(): string | null {
@@ -680,7 +715,7 @@ export class VmManager {
           restored[0]!;
         this.#activeSessionId = preferred.id;
         this.#onSessionsChange?.();
-        this.#onStatus({ phase: "ready", title: "Ready" });
+        this.#reportReady();
         if (restored.length < entries.length) {
           this.#onNotice?.(`已恢复 ${restored.length} / ${entries.length} 个终端会话`);
         }
@@ -933,15 +968,6 @@ export class VmManager {
       this.memoryRequestedMiB = targetMemoryMiB;
     }
 
-    // Sync disk automatically when page becomes hidden
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "hidden") {
-        void this.syncDisk();
-      }
-    });
-    window.addEventListener("pagehide", () => {
-      void this.syncDisk();
-    });
     if (distro === "debian") {
       await installDebianTools(vm).catch((error: unknown) => {
         this.#onNotice?.(`Debian 工具切换不可用：${error instanceof Error ? error.message : String(error)}`, 6000);
@@ -1236,7 +1262,7 @@ export class VmManager {
       this.#onSessionsChange?.();
     }
     if (opts.ready) {
-      this.#onStatus({ phase: "ready", title: "Ready" });
+      this.#reportReady();
     }
     return session;
   }
@@ -1358,10 +1384,11 @@ export class VmManager {
     }
     if (indices.length === 0) throw new Error("这份备份没有数据块，无法从中恢复文件系统。");
     const distro = this.activeDistro;
-    await this.#stopForReload();
-    await importDataDisk(bytes, { name: DISTROS[distro].diskName, version: DISK_VERSION, size });
-    localStorage.removeItem(diskSizeKey(distro));
-    location.reload();
+    await this.#reloadAfter(async () => {
+      await this.#stopForReload();
+      await importDataDisk(bytes, { name: DISTROS[distro].diskName, version: DISK_VERSION, size });
+      localStorage.removeItem(diskSizeKey(distro));
+    });
   }
 
   async syncAndReload(): Promise<void> {
@@ -1369,8 +1396,20 @@ export class VmManager {
       location.reload();
       return;
     }
-    await this.#stopForReload();
-    location.reload();
+    await this.#reloadAfter(() => this.#stopForReload());
+  }
+
+  async #reloadAfter(prepare: () => Promise<void>): Promise<void> {
+    if (this.#suspending) throw new Error("请等待挂起操作完成后重试");
+    if (this.#reloading) throw new Error("虚拟机正在重启");
+    this.#reloading = true;
+    try {
+      await prepare();
+      location.reload();
+    } catch (error) {
+      this.#reloading = false;
+      throw error;
+    }
   }
 
   async #stopForReload(): Promise<void> {
@@ -1398,30 +1437,42 @@ export class VmManager {
     if (this.isSnapshotMode) {
       throw new Error("内存快照模式下无法重置持久化磁盘");
     }
-    this.#stopWasiServer();
-    if (this.vm instanceof WorkerKernel) {
-      await this.vm.detachDisk(0).catch(() => {});
-      await this.vm.stop().catch(() => {});
+    await this.#reloadAfter(async () => {
+      this.#stopWasiServer();
+      if (this.vm instanceof WorkerKernel) {
+        await this.vm.detachDisk(0).catch(() => {});
+        await this.vm.stop().catch(() => {});
+      }
+      await resetDataDisk({ name: DISTROS[this.activeDistro].diskName, version: DISK_VERSION });
+      localStorage.removeItem(diskSizeKey(this.activeDistro));
+      await deleteSuspendedSession(this.activeDistro).catch(() => {});
+    });
+  }
+
+  #suspendBlocker(): string | undefined {
+    const vm = this.vm;
+    if (this.isSnapshotMode) {
+      return "内存快照模式不支持挂起会话（更改不会写回 IndexedDB）";
     }
-    await resetDataDisk({ name: DISTROS[this.activeDistro].diskName, version: DISK_VERSION });
-    localStorage.removeItem(diskSizeKey(this.activeDistro));
-    await deleteSuspendedSession(this.activeDistro).catch(() => {});
-    location.reload();
+    if (!(vm instanceof WorkerKernel) || !vm.disks[0]?.persistent || !this.#bootedNetwork) {
+      return "挂起需要正在运行的虚拟机和持久化磁盘";
+    }
+    if (this.#suspending) return "正在保存挂起会话";
+    if (this.#reloading) return "虚拟机正在重启";
+    if (this.hasPendingDistroChange()) return "请先应用发行版切换，或选回当前发行版后挂起";
+    if (this.mountedFolders.size || vm.mounts.size) {
+      return "请先卸载本地目录，再挂起虚拟机";
+    }
   }
 
   async suspendSession(): Promise<void> {
-    const vm = this.vm;
-    if (this.isSnapshotMode) {
-      throw new Error("内存快照模式不支持挂起会话（更改不会写回 IndexedDB）");
-    }
-    if (!(vm instanceof WorkerKernel) || !vm.disks[0]?.persistent || !this.#bootedNetwork) {
-      throw new Error("挂起需要正在运行的虚拟机和持久化磁盘");
-    }
-    if (this.#suspending) throw new Error("正在保存挂起会话");
-    if (this.hasPendingDistroChange()) throw new Error("请先应用发行版切换，或选回当前发行版后挂起");
-    if (this.mountedFolders.size > 0) {
-      throw new Error("请先卸载本地目录，再挂起虚拟机");
-    }
+    await this.#saveSession();
+  }
+
+  async #saveSession(shown?: AbortSignal): Promise<"stopped" | "continued"> {
+    const blocker = this.#suspendBlocker();
+    if (blocker) throw new Error(blocker);
+    const vm = this.vm!;
     const distro = this.activeDistro;
     const liveSessions = this.#sessions.filter((s) => !s.exited && s.pty !== null);
     const suspendedEntries: SuspendedTerminalEntry[] = [];
@@ -1446,10 +1497,11 @@ export class VmManager {
       terminalId: active?.pty?.sessionId ?? suspendedEntries[0]?.terminalId,
       activeSessionId: active && !active.exited ? active.id : suspendedEntries[0]?.id,
       sessions: suspendedEntries,
-      network: this.#bootedNetwork,
+      network: this.#bootedNetwork!,
     };
     this.#suspending = true;
     let bytes = 0;
+    let heldWorker: AbortSignal | undefined;
     try {
       await vm.snapshot({
         dropCaches: true,
@@ -1467,20 +1519,37 @@ export class VmManager {
             signal.throwIfAborted();
           }
         },
+        hold: shown && ((_snapshot, workerEnded) => {
+          heldWorker = workerEnded;
+          console.info("[auto-suspend] 快照已保存，虚拟机已暂停");
+          return holdUntilShown(shown, workerEnded);
+        }),
+      }).catch(async (error: unknown) => {
+        if (bytes) await deleteSuspendedSession(distro, session.id).catch(() => {});
+        throw error;
       });
+      if (heldWorker && !heldWorker.aborted) {
+        // The Worker acknowledged continuing. Until then this was our recovery copy.
+        await deleteSuspendedSession(distro, session.id).catch(() => {
+          this.#onNotice?.("虚拟机已继续运行，但无法清除旧快照");
+        });
+        return "continued";
+      }
       this.#stopWasiServer();
+      // A stopped Worker's PTYs can report their disconnect after snapshot() resolves.
+      for (const terminal of this.#sessions) terminal.pty = null;
       this.#sessions = [];
       this.#activeSessionId = null;
       this.vm = null;
       this.#onSessionsChange?.();
-      this.#onStatus({
-        phase: "suspended",
-        title: `${DISTROS[distro].label} 已挂起`,
-        detail: `会话已保存到此浏览器 (${(bytes / 1048576).toFixed(1)} MiB)`,
-      });
-    } catch (err) {
-      if (bytes) await deleteSuspendedSession(distro, session.id).catch(() => {});
-      throw err;
+      if (!shown) {
+        this.#onStatus({
+          phase: "suspended",
+          title: `${DISTROS[distro].label} 已挂起`,
+          detail: `会话已保存到此浏览器 (${(bytes / 1048576).toFixed(1)} MiB)`,
+        });
+      }
+      return "stopped";
     } finally {
       this.#suspending = false;
     }

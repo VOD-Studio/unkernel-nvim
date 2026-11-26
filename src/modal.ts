@@ -363,7 +363,7 @@ export class ModalController {
   #renderStorage(): void {
     const panel = this.#panel("storage");
     const distro = DISTROS[this.#vmManager.activeDistro].label;
-    const { diskSize, targetDiskSize, isSnapshotMode, diskNotice, lastDiskError } = this.#vmManager;
+    const { diskSize, targetDiskSize, isSnapshotMode, diskNotice, lastDiskError, autoSuspendEnabled } = this.#vmManager;
     panel.innerHTML = `
       ${
         lastDiskError
@@ -399,6 +399,16 @@ export class ModalController {
             <button class="mini-btn" id="btn-save-disk-size" type="submit">保存容量</button>
           </div>
         </form>
+        <div class="row-bar">
+          <div class="row-label-group">
+            <span class="row-label" id="label-auto-suspend">切到后台时自动挂起</span>
+            <span class="row-hint" id="hint-auto-suspend">${isSnapshotMode ? "仅持久化磁盘支持自动挂起。" : "关闭可让后台构建继续运行。挂载本地目录时仅同步磁盘。"}</span>
+          </div>
+          <button class="mini-btn" id="btn-auto-suspend" type="button" role="switch"
+            aria-labelledby="label-auto-suspend" aria-describedby="hint-auto-suspend" aria-checked="${autoSuspendEnabled}">
+            ${autoSuspendEnabled ? "开启" : "关闭"}
+          </button>
+        </div>
         <div class="modal-grid">
           <button class="modal-btn" id="btn-sync-disk" type="button">
             <span>立即同步落盘 (Sync)</span>
@@ -828,6 +838,14 @@ export class ModalController {
   #bindStorageEvents(panel: HTMLElement): void {
     const q = <T extends HTMLElement>(sel: string) => panel.querySelector<T>(sel)!;
     const run = (action: () => Promise<void>) => () => void this.#runDiskAction("storage", action);
+
+    const autoSuspend = q<HTMLButtonElement>("#btn-auto-suspend");
+    autoSuspend.addEventListener("click", () => {
+      const enabled = !this.#vmManager.autoSuspendEnabled;
+      this.#vmManager.setAutoSuspendEnabled(enabled);
+      autoSuspend.setAttribute("aria-checked", String(enabled));
+      autoSuspend.textContent = enabled ? "开启" : "关闭";
+    });
 
     q<HTMLFormElement>("#form-disk-size").addEventListener("submit", (e) => {
       e.preventDefault();

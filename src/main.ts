@@ -275,6 +275,11 @@ const vmManager = new VmManager({
 
 const preview = new GuestPreview(() => vmManager.vm, () => terminal.focus());
 
+const updateVisibility = () => vmManager.updatePageVisibility();
+document.addEventListener("visibilitychange", updateVisibility);
+window.addEventListener("pagehide", () => vmManager.updatePageVisibility(true));
+window.addEventListener("pageshow", updateVisibility);
+
 vmManager.setCommands(
   createHostCommands({
     readClipboard: async () => {
