@@ -111,7 +111,7 @@ bun run prebake
 docker compose up -d --build
 ```
 
-也可以从 GHCR 拉取已发布的镜像。将 `.env` 中的 `UNKERNEL_NVIM_IMAGE` 设为发布说明中提供的完整版本或摘要，例如 `ghcr.io/vod-studio/unkernel-nvim:0.1.0`。两个服务都使用这个镜像，部署机只需 Docker Compose。 [GitHub Releases](https://github.com/VOD-Studio/unkernel-nvim/releases)
+也可以从 GHCR 拉取已发布的镜像。将 `.env` 中的 `UNKERNEL_NVIM_IMAGE` 设为发布说明中提供的完整版本或摘要，例如 `ghcr.io/vod-studio/unkernel-nvim:0.2.0`。两个服务都使用这个镜像，部署机只需 Docker Compose。 [GitHub Releases](https://github.com/VOD-Studio/unkernel-nvim/releases)
 
 ```bash
 docker compose pull
