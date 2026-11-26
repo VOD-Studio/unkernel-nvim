@@ -6,6 +6,8 @@ export const MAX_DISK_GIB = 1024;
 export const SNAPSHOT_LIMIT_BYTES = 512 * 1024 * 1024;
 
 export type DiskMode = "persistent" | "snapshot";
+export type DiskBootMode = DiskMode | "resume";
+export type DiskCacheState = "ready" | "empty" | "unavailable";
 
 export function parseDiskGiB(value: string | null): number | undefined {
   if (!value || !/^\d+$/.test(value.trim())) return;
@@ -25,13 +27,13 @@ export function parseDiskModeParam(value: string | null): DiskMode | undefined {
   return undefined;
 }
 
-export function shouldDownloadTemplate(
-  seeded: boolean,
+export function getDiskCacheState(
+  initialized: boolean,
   storedBytes: number,
-  mode: DiskMode,
-  limitBytes = SNAPSHOT_LIMIT_BYTES,
-): boolean {
-  if (!seeded) return true;
-  if (mode === "snapshot" && storedBytes > limitBytes) return true;
-  return false;
+  mode: DiskBootMode,
+): DiskCacheState {
+  if (!initialized) return "unavailable";
+  if (storedBytes === 0) return "empty";
+  if (mode === "snapshot" && storedBytes > SNAPSHOT_LIMIT_BYTES) return "unavailable";
+  return "ready";
 }

@@ -39,6 +39,12 @@ describe("diagnostics", () => {
     expect(fallback.safeMode).toBe(true);
   });
 
+  test("reports a missing data disk separately from overlay safe mode", () => {
+    const info = parseKwBase("name=debian\nimage=/dev/wda\nupper=tmpfs\nwhy=no data disk\n");
+    expect(info.dataDiskMissing).toBe(true);
+    expect(info.safeMode).toBe(false);
+  });
+
   test("formatByteSize scales B, KiB, MiB, and GiB", () => {
     expect(formatByteSize(0)).toBe("0 B");
     expect(formatByteSize(512)).toBe("512 B");

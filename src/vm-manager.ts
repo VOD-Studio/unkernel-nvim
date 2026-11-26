@@ -50,12 +50,14 @@ import {
 } from "./diagnostics.ts";
 import {
   DEFAULT_DISK_GIB,
+  getDiskCacheState,
   GIB,
   MAX_DISK_GIB,
   parseDiskGiB,
   parseDiskModeParam,
-  shouldDownloadTemplate,
   SNAPSHOT_LIMIT_BYTES,
+  type DiskBootMode,
+  type DiskCacheState,
   type DiskMode,
 } from "./disk-config.ts";
 import {
@@ -153,65 +155,38 @@ export interface MountedFolder {
   mount: Mount;
 }
 
-/**
- * Fast probe of the distro's IndexedDB disk to check whether the
- * persistent data disk has already been seeded and estimate its stored size.
- */
-async function probeDataDiskStore(name: string): Promise<{ seeded: boolean; storedBytes: number }> {
-  if (typeof indexedDB === "undefined") return { seeded: false, storedBytes: 0 };
-  const dbName = `kwdisk:${name}-${DISK_VERSION}`;
-  return new Promise<{ seeded: boolean; storedBytes: number }>((resolve) => {
-    try {
-      const req = indexedDB.open(dbName, 1);
-      req.onupgradeneeded = () => {
-        // DB did not exist yet; abort creation so openDataDisk initializes it cleanly.
-        req.transaction?.abort();
-        resolve({ seeded: false, storedBytes: 0 });
+async function prepareDataDiskStore(name: string, mode: DiskBootMode): Promise<DiskCacheState> {
+  if (typeof indexedDB === "undefined") return "unavailable";
+  let db: IDBDatabase | undefined;
+  try {
+    db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const req = indexedDB.open(`kwdisk:${name}-${DISK_VERSION}`, 1);
+      // Let unkernel create the stores on first boot.
+      req.onupgradeneeded = () => req.transaction?.abort();
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => resolve(req.result);
+    });
+    const tx = db.transaction(["meta", "blocks"], mode === "persistent" ? "readwrite" : "readonly");
+    const meta = tx.objectStore("meta");
+    const initialized = meta.get("initialized");
+    const reset = meta.get("reset");
+    const count = tx.objectStore("blocks").count();
+    return await new Promise<DiskCacheState>((resolve, reject) => {
+      let state: DiskCacheState = "unavailable";
+      count.onsuccess = () => {
+        state = getDiskCacheState(initialized.result === true && !reset.result, count.result * 4096, mode);
+        // unkernel seeds from the template only if this marker is absent.
+        // Check the block count and clear the stale marker in the same transaction.
+        if (state === "empty" && mode === "persistent") meta.delete("initialized");
       };
-      req.onerror = () => resolve({ seeded: false, storedBytes: 0 });
-      req.onsuccess = () => {
-        const db = req.result;
-        try {
-          if (!db.objectStoreNames.contains("meta")) {
-            db.close();
-            resolve({ seeded: false, storedBytes: 0 });
-            return;
-          }
-          const storeNames = db.objectStoreNames.contains("blocks") ? ["meta", "blocks"] : ["meta"];
-          const tx = db.transaction(storeNames, "readonly");
-          let seeded = false;
-          let storedBytes = 0;
-          const initReq = tx.objectStore("meta").get("initialized");
-          initReq.onsuccess = () => {
-            seeded = initReq.result === true;
-          };
-          if (storeNames.includes("blocks")) {
-            const countReq = tx.objectStore("blocks").count();
-            countReq.onsuccess = () => {
-              storedBytes = countReq.result * 4096;
-            };
-          }
-          tx.oncomplete = () => {
-            db.close();
-            resolve({ seeded, storedBytes });
-          };
-          tx.onerror = () => {
-            db.close();
-            resolve({ seeded: false, storedBytes: 0 });
-          };
-          tx.onabort = () => {
-            db.close();
-            resolve({ seeded: false, storedBytes: 0 });
-          };
-        } catch {
-          db.close();
-          resolve({ seeded: false, storedBytes: 0 });
-        }
-      };
-    } catch {
-      resolve({ seeded: false, storedBytes: 0 });
-    }
-  });
+      tx.oncomplete = () => resolve(state);
+      tx.onabort = () => reject(tx.error);
+    });
+  } catch {
+    return "unavailable";
+  } finally {
+    db?.close();
+  }
 }
 
 export type NetMode = "builtin" | "custom" | "off";
@@ -278,7 +253,7 @@ export class VmManager {
   memoryRequestedMiB: number | null = null;
   memoryAllocatedMiB: number | null = null;
   memoryFallbackReasons: string[] = [];
-  seededFromCache = false;
+  #diskCacheState: DiskCacheState = "unavailable";
   diskMode: DiskMode = "persistent";
   #lastDiskError: DiskErrorInfo | null = null;
   #lastDiskErrorToastAt = 0;
@@ -287,11 +262,18 @@ export class VmManager {
   #kwBaseInfo: KwBaseInfo | null = null;
   #lastKernelAlertAt = 0;
 
+  get seededFromCache(): boolean {
+    return this.#diskCacheState === "ready";
+  }
+
   get isSnapshotMode(): boolean {
     return this.diskMode === "snapshot";
   }
 
   get diskNotice(): string | null {
+    if (this.isSnapshotMode && this.#diskCacheState === "empty") {
+      return `已保存的数据盘为空，本次使用 ${DISTROS[this.activeDistro].label} 初始镜像`;
+    }
     return this.vm instanceof WorkerKernel ? this.vm.disks[0]?.notice ?? null : null;
   }
 
@@ -576,20 +558,24 @@ export class VmManager {
     this.#wasiServer = null;
   }
 
-  async #prepareDataDisk(distro: Distro, signal: AbortSignal, mode: DiskMode): Promise<Uint8Array> {
+  async #prepareDataDisk(distro: Distro, signal: AbortSignal, mode: DiskBootMode): Promise<Uint8Array> {
     const { diskName, label, template } = DISTROS[distro];
     this.#onStatus({ phase: "disk-check", title: `检查 ${label} 持久化磁盘…` });
-    const probe = await probeDataDiskStore(diskName);
-    this.seededFromCache = probe.seeded;
+    this.#diskCacheState = await prepareDataDiskStore(diskName, mode);
     signal.throwIfAborted();
+    if (mode === "resume" && !this.seededFromCache) {
+      throw new Error(`无法恢复挂起会话：未找到可用的 ${label} 持久化数据盘。`);
+    }
     let bytes: Uint8Array;
-    if (!shouldDownloadTemplate(probe.seeded, probe.storedBytes, mode, SNAPSHOT_LIMIT_BYTES)) {
+    if (this.seededFromCache) {
       bytes = kwsparseHeader(DISK_SIZE_BYTES, 4096, []);
     } else {
       const title =
         mode === "snapshot"
           ? `正在加载 ${label} 的 Neovim 镜像以启动内存快照…`
-          : `首次启动：正在加载 ${label} 的 Neovim 镜像…`;
+          : this.#diskCacheState === "empty"
+            ? `正在从镜像恢复空的 ${label} 数据盘…`
+            : `首次启动：正在加载 ${label} 的 Neovim 镜像…`;
       this.#onStatus({ phase: "disk-download", title, progress: 0 });
       let lastUpdate = performance.now();
       try {
@@ -795,7 +781,7 @@ export class VmManager {
     try {
       [kernel, templateBytes] = await Promise.all([
         loadKernelModule(bundledKernelUrl, { smp: cpus > 1, signal: loading.signal }),
-        this.#prepareDataDisk(distro, loading.signal, diskMode),
+        this.#prepareDataDisk(distro, loading.signal, restore ? "resume" : diskMode),
       ]);
     } catch (err) {
       loading.abort();
@@ -813,7 +799,8 @@ export class VmManager {
       version: DISK_VERSION,
       template: templateBytes,
       mode: diskMode,
-      ...(diskMode === "snapshot" ? { snapshotLimit: SNAPSHOT_LIMIT_BYTES } : {}),
+      // A zero limit tells unkernel to use the template instead of copying an empty store.
+      ...(diskMode === "snapshot" ? { snapshotLimit: this.seededFromCache ? SNAPSHOT_LIMIT_BYTES : 0 } : {}),
       size: restore || diskMode === "snapshot" ? undefined : this.#configuredDiskSize(distro),
     };
 
@@ -1058,11 +1045,16 @@ export class VmManager {
     return out || "已标记重置 Overlay，下次重启生效。";
   }
 
-  async #readBaseShellReason(vm: KernelHandle): Promise<string | null> {
+  async #distroBootError(vm: KernelHandle): Promise<string | null> {
     const info = await this.refreshKwBase(vm);
     if (!info) return null;
+    const label = DISTROS[this.activeDistro].label;
+    if (info.dataDiskMissing) {
+      return `${label} 未挂载 Neovim 数据盘（${info.why}）。可在控制中心「存储与备份」导出当前磁盘或导入可用备份。`;
+    }
     if (info.upper === "none" || info.safeMode) {
-      return info.why || "回退到了基础 initramfs";
+      const reason = info.why || "回退到了基础 initramfs";
+      return `${label} 系统镜像无法引导（${reason}）。请运行 bun run prebake ${this.activeDistro} 刷新本地镜像后刷新页面。`;
     }
     return null;
   }
@@ -1134,13 +1126,8 @@ export class VmManager {
       });
 
     const throwDistroBootErrorIfBase = async (err: unknown): Promise<never> => {
-      const reason = this.vm ? await this.#readBaseShellReason(this.vm) : null;
-      if (reason) {
-        throw new Error(
-          `${DISTROS[this.activeDistro].label} 系统镜像无法引导（${reason}）。请运行 bun run prebake ${this.activeDistro} 刷新本地镜像后刷新页面。`,
-          { cause: err },
-        );
-      }
+      const message = this.vm ? await this.#distroBootError(this.vm) : null;
+      if (message) throw new Error(message, { cause: err });
       throw err;
     };
 
@@ -1380,11 +1367,12 @@ export class VmManager {
       throw new Error("内存快照模式下无法覆盖 IndexedDB 持久化磁盘");
     }
     const bytes = await gunzipIfNeeded(await file.arrayBuffer());
-    const { size, blockSize } = decodeKwsparse(bytes);
+    const { size, blockSize, indices } = decodeKwsparse(bytes);
     if (blockSize !== 4096 || !Number.isSafeInteger(size) || size % blockSize !== 0 ||
         size < DISK_SIZE_BYTES || size > MAX_DISK_GIB * GIB) {
       throw new Error(`备份须为 ${DEFAULT_DISK_GIB}–${MAX_DISK_GIB} GiB 的数据盘，使用 4 KiB 磁盘块`);
     }
+    if (indices.length === 0) throw new Error("这份备份没有数据块，无法从中恢复文件系统。");
     const distro = this.activeDistro;
     await this.#stopForReload();
     await importDataDisk(bytes, { name: DISTROS[distro].diskName, version: DISK_VERSION, size });

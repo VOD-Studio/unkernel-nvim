@@ -4,11 +4,11 @@ import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_DISK_GIB,
   formatDiskGiB,
+  getDiskCacheState,
   GIB,
   MAX_DISK_GIB,
   parseDiskGiB,
   parseDiskModeParam,
-  shouldDownloadTemplate,
   SNAPSHOT_LIMIT_BYTES,
 } from "./disk-config.ts";
 
@@ -35,12 +35,19 @@ describe("disk-config", () => {
     expect(parseDiskModeParam(null)).toBeUndefined();
   });
 
-  test("shouldDownloadTemplate skips template only when seeded and within snapshot limit", () => {
-    expect(shouldDownloadTemplate(false, 0, "persistent")).toBe(true);
-    expect(shouldDownloadTemplate(false, 0, "snapshot")).toBe(true);
-    expect(shouldDownloadTemplate(true, 100 * 1024 * 1024, "persistent")).toBe(false);
-    expect(shouldDownloadTemplate(true, 100 * 1024 * 1024, "snapshot")).toBe(false);
-    expect(shouldDownloadTemplate(true, SNAPSHOT_LIMIT_BYTES + 4096, "snapshot")).toBe(true);
-    expect(shouldDownloadTemplate(true, SNAPSHOT_LIMIT_BYTES + 4096, "persistent")).toBe(false);
+  test("detects an initialized disk with no blocks in every boot mode", () => {
+    expect(getDiskCacheState(true, 0, "persistent")).toBe("empty");
+    expect(getDiskCacheState(true, 0, "snapshot")).toBe("empty");
+    expect(getDiskCacheState(true, 0, "resume")).toBe("empty");
+  });
+
+  test("reuses populated disks and respects the in-memory copy limit", () => {
+    expect(getDiskCacheState(false, 0, "persistent")).toBe("unavailable");
+    expect(getDiskCacheState(false, 0, "snapshot")).toBe("unavailable");
+    expect(getDiskCacheState(true, 4096, "persistent")).toBe("ready");
+    expect(getDiskCacheState(true, SNAPSHOT_LIMIT_BYTES, "snapshot")).toBe("ready");
+    expect(getDiskCacheState(true, SNAPSHOT_LIMIT_BYTES + 4096, "snapshot")).toBe("unavailable");
+    expect(getDiskCacheState(true, SNAPSHOT_LIMIT_BYTES + 4096, "persistent")).toBe("ready");
+    expect(getDiskCacheState(true, SNAPSHOT_LIMIT_BYTES + 4096, "resume")).toBe("ready");
   });
 });

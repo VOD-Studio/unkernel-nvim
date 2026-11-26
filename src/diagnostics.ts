@@ -16,6 +16,7 @@ export interface KwBaseInfo {
   state: string;
   dev: string;
   fstype: string;
+  dataDiskMissing: boolean;
   safeMode: boolean;
 }
 
@@ -77,11 +78,12 @@ export function parseKwBase(raw: string): KwBaseInfo {
   const state = fields.state ?? "";
   const dev = fields.dev ?? "";
   const fstype = fields.fstype ?? "";
+  const dataDiskMissing = why === "no data disk";
   const safeMode =
     why.toLowerCase().startsWith("safe mode") ||
-    (upper !== "" && upper !== "data" && Boolean(why));
+    (!dataDiskMissing && upper !== "" && upper !== "data" && Boolean(why));
 
-  return { name, image, upper, why, state, dev, fstype, safeMode };
+  return { name, image, upper, why, state, dev, fstype, dataDiskMissing, safeMode };
 }
 
 /** Format byte counts cleanly for block / SHM throughput counters. */
