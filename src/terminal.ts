@@ -76,7 +76,6 @@ export class CanvasTerminal {
   #activeId: string | null = null;
   #unclaimedId: string | null = null;
   #fontSize: number;
-  #encoder = new TextEncoder();
   #resizeTimer: ReturnType<typeof setTimeout> | undefined;
   #onToggleMenu?: () => void;
   #onCycleSession?: (delta: 1 | -1) => void;
@@ -394,8 +393,8 @@ export class CanvasTerminal {
     this.#activePane?.term.focus();
   }
 
-  sendText(text: string): void {
-    this.#activePane?.pty?.write(this.#encoder.encode(text)).catch(() => {});
+  paste(text: string): void {
+    this.#activePane?.term.paste(text);
   }
 
   mountSession(id: string, pty: Pty, scrollback = 0, opts: { activate?: boolean } = {}): void {

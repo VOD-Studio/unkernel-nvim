@@ -67,7 +67,7 @@ import {
   type DiskErrorInfo,
 } from "./disk-diagnostics.ts";
 import { BrowserDirectoryFs } from "./fs-bridge.ts";
-import { sanitizeDropFilename } from "./host-commands.ts";
+import { readGuestDownload, uploadGuestFile } from "./guest-file-transfer.ts";
 import {
   MEMORY_FALLBACK_MIB,
   MEMORY_STORAGE_KEY,
@@ -1290,6 +1290,11 @@ export class VmManager {
     return readGuestFileViaShm({ shm, exec: this.vm.exec.bind(this.vm) }, guestPath, signal);
   }
 
+  async readDownload(guestPath: string, signal?: AbortSignal): Promise<File> {
+    if (!this.vm || this.#suspending) throw new Error("虚拟机当前无法下载文件");
+    return readGuestDownload(this.vm, guestPath, signal);
+  }
+
   async writeGuestFile(destPath: string, bytes: Uint8Array, signal?: AbortSignal): Promise<void> {
     if (!this.vm || this.#suspending) throw new Error("虚拟机当前无法写入文件");
     const slash = destPath.lastIndexOf("/");
@@ -1304,31 +1309,10 @@ export class VmManager {
     signal?: AbortSignal,
   ): Promise<string[]> {
     if (!this.vm || this.#suspending) throw new Error("虚拟机当前无法写入文件");
-    const dir = targetDir.replace(/\/+$/, "") || "/";
-    const used = new Set<string>();
+    const vm = this.vm;
     const written: string[] = [];
-    const shm = this.vm instanceof WorkerKernel ? this.vm.shm : undefined;
-    const exec = this.vm.exec.bind(this.vm);
-
     for (const file of files) {
-      const base = sanitizeDropFilename(file.name);
-      let candidate = base;
-      if (used.has(candidate)) {
-        const dot = base.lastIndexOf(".");
-        const stem = dot > 0 ? base.slice(0, dot) : base;
-        const ext = dot > 0 ? base.slice(dot) : "";
-        let index = 2;
-        while (used.has(`${stem}-${index}${ext}`)) {
-          index += 1;
-        }
-        candidate = `${stem}-${index}${ext}`;
-      }
-      used.add(candidate);
-
-      const destPath = dir === "/" ? `/${candidate}` : `${dir}/${candidate}`;
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      await writeGuestFileViaShm({ shm, exec }, dir, destPath, bytes, signal);
-      written.push(destPath);
+      written.push(await uploadGuestFile(vm, file, targetDir, signal));
     }
 
     return written;

@@ -5,6 +5,7 @@
 import { type DiskMode } from "./disk-config.ts";
 import { DISTROS } from "./distro.ts";
 import { pickHostDirectory } from "./fs-bridge.ts";
+import { foregroundShellDirectory } from "./guest-file-transfer.ts";
 import { GuestPreview } from "./guest-preview.ts";
 import {
   createBrowserFilePicker,
@@ -226,21 +227,24 @@ const terminal = new CanvasTerminal({
     hideBootOverlay();
   },
   onDropFiles: async (files) => {
-    if (!vmManager.vm) {
+    const vm = vmManager.vm;
+    const session = vmManager.activeSession;
+    if (!vm || !session?.pty || session.exited) {
       showToast("虚拟机尚未就绪");
       return;
     }
-    const targetDir = vmManager.currentCwd || "/workspace";
     try {
+      const shellDir = session.mode === "shell" ? await foregroundShellDirectory(vm, session.pty.pid) : null;
+      const targetDir = shellDir ?? session.cwd;
+      if (vmManager.vm !== vm) return;
       const paths = await vmManager.writeGuestFiles(files, targetDir);
       showToast(
         paths.length === 1
           ? `已导入 ${paths[0]}`
           : `已导入 ${paths.length} 个文件到 ${targetDir}`,
       );
-      if (vmManager.currentMode === "shell") {
-        terminal.sendText(`${paths.map(shellQuoteArg).join(" ")} `);
-      }
+      if (vmManager.activeSession !== session || session.exited || modal?.isOpen) return;
+      if (session.mode === "shell" && !shellDir) terminal.paste(`${paths.map(shellQuoteArg).join(" ")} `);
       terminal.focus();
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), 5000);
@@ -290,6 +294,7 @@ vmManager.setCommands(
     navigatePreview: (port, path) => preview.openAt(port, path),
     openUrl: (url) => Boolean(window.open(url, "_blank", "noopener,noreferrer")),
     readGuestFile: (guestPath, signal) => vmManager.readGuestFile(guestPath, signal),
+    readDownload: (guestPath, signal) => vmManager.readDownload(guestPath, signal),
     writeGuestFile: (guestPath, bytes, signal) => vmManager.writeGuestFile(guestPath, bytes, signal),
     writeGuestFiles: (files, targetDir, signal) => vmManager.writeGuestFiles(files, targetDir, signal),
     triggerDownload: triggerBrowserDownload,

@@ -305,15 +305,10 @@ export class BrowserDirectoryFs implements Fs {
         throw new FsError("EOPNOTSUPP", "Directory rename is not supported by browser FileSystemAccess API");
       }
       const srcFile = await (entry as FileSystemFileHandle).getFile();
-      const bytes = new Uint8Array(await srcFile.arrayBuffer());
       const { parent: dstParent, name: dstName } = await this.#resolveParent(to);
       const dstHandle = await dstParent.getFileHandle(dstName, { create: true });
       const writable = await dstHandle.createWritable();
-      try {
-        await writable.write(bytes);
-      } finally {
-        await writable.close();
-      }
+      await srcFile.stream().pipeTo(writable);
       const { parent: srcParent, name: srcName } = await this.#resolveParent(from);
       await srcParent.removeEntry(srcName);
       const mode = this.#modes.get(from);

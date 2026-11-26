@@ -98,6 +98,7 @@ function makeMockDeps(overrides: Partial<HostCommandDeps> = {}): HostCommandDeps
     navigatePreview: () => {},
     openUrl: () => true,
     readGuestFile: async () => new Uint8Array([1, 2, 3]),
+    readDownload: async () => new File([], "download.bin"),
     writeGuestFile: async () => {},
     writeGuestFiles: async (files, dir) => files.map((f) => `${dir}/${f.name}`),
     triggerDownload: () => {},
@@ -252,25 +253,26 @@ describe("createHostCommands", () => {
     expect(notices[0]).toContain("https://neovim.io/");
   });
 
-  test("download reads guest files and stdin '-' mode", async () => {
-    const downloads: Array<{ name: string; bytes: Uint8Array }> = [];
+  test("download keeps individual files, directory archives, and stdin downloads", async () => {
+    const downloads: File[] = [];
     const cmds = createHostCommands(
       makeMockDeps({
-        readGuestFile: async (p) => new TextEncoder().encode(`content:${p}`),
-        triggerDownload: (bytes, name) => downloads.push({ name, bytes }),
+        readDownload: async (path) => new File([`content:${path}`], path === "/workspace/src" ? "src.tar.gz" : "notes.txt"),
+        triggerDownload: (file) => downloads.push(file),
       }),
     );
 
-    const fileRun = makeMockContext({ name: "download", cwd: "/workspace", args: ["notes.txt"] });
+    const fileRun = makeMockContext({ name: "download", cwd: "/workspace", args: ["notes.txt", "src"] });
     expect(await cmds.download!(fileRun.ctx)).toBe(0);
     expect(downloads[0]?.name).toBe("notes.txt");
-    expect(new TextDecoder().decode(downloads[0]?.bytes)).toBe("content:/workspace/notes.txt");
+    expect(await downloads[0]?.text()).toBe("content:/workspace/notes.txt");
+    expect(downloads[1]?.name).toBe("src.tar.gz");
     expect(fileRun.stdout()).toContain("已下载 notes.txt");
 
     const stdinRun = makeMockContext({ name: "download", args: ["-", "pipe.txt"], input: "abc" });
     expect(await cmds.download!(stdinRun.ctx)).toBe(0);
-    expect(downloads[1]?.name).toBe("pipe.txt");
-    expect(new TextDecoder().decode(downloads[1]?.bytes)).toBe("abc");
+    expect(downloads[2]?.name).toBe("pipe.txt");
+    expect(await downloads[2]?.text()).toBe("abc");
   });
 
   test("upload writes picked files into target dir and prints paths", async () => {

@@ -18,9 +18,10 @@ export interface HostCommandDeps {
   navigatePreview: (port: number, path: string) => void;
   openUrl: (url: string) => boolean;
   readGuestFile: (guestPath: string, signal?: AbortSignal) => Promise<Uint8Array>;
+  readDownload: (guestPath: string, signal?: AbortSignal) => Promise<File>;
   writeGuestFile?: (guestPath: string, bytes: Uint8Array, signal?: AbortSignal) => Promise<void>;
   writeGuestFiles: (files: readonly File[], targetDir: string, signal?: AbortSignal) => Promise<string[]>;
-  triggerDownload: (bytes: Uint8Array, filename: string) => void;
+  triggerDownload: (file: File) => void;
   pickUploadFiles: (signal: AbortSignal) => Promise<File[]>;
   mountDirectory: () => Promise<string>;
   listMounts: () => string[];
@@ -309,14 +310,14 @@ export function createHostCommands(deps: HostCommandDeps): CommandsOption {
 
     async download(ctx) {
       if (ctx.args.length === 0 || ctx.args[0] === "-h" || ctx.args[0] === "--help") {
-        await writeErr(ctx, "用法: download <file> [file...] | <stdout> | download - [filename]");
+        await writeErr(ctx, "用法: download <文件或目录> [...] | <stdout> | download - [filename]");
         return 2;
       }
       if (ctx.args[0] === "-") {
         try {
           const filename = sanitizeDropFilename(ctx.args[1] || "download.bin");
           const bytes = await readStreamLimited(ctx.stdin, MAX_DOWNLOAD_STDIN_BYTES, ctx.signal);
-          deps.triggerDownload(bytes, filename);
+          deps.triggerDownload(new File([bytes.slice()], filename));
           await writeOut(ctx, `已下载 ${filename} (${bytes.byteLength} B)\n`);
           return 0;
         } catch (err) {
@@ -328,11 +329,10 @@ export function createHostCommands(deps: HostCommandDeps): CommandsOption {
       const home = ctx.env.HOME || "/root";
       for (const arg of ctx.args) {
         const guestPath = resolveGuestPath(ctx.cwd, arg, home);
-        const filename = sanitizeDropFilename(guestPath.split("/").pop() || "download.bin");
         try {
-          const bytes = await deps.readGuestFile(guestPath, ctx.signal);
-          deps.triggerDownload(bytes, filename);
-          await writeOut(ctx, `已下载 ${filename} (${bytes.byteLength} B)\n`);
+          const file = await deps.readDownload(guestPath, ctx.signal);
+          deps.triggerDownload(file);
+          await writeOut(ctx, `已下载 ${file.name} (${file.size} B)\n`);
         } catch (err) {
           await writeErr(ctx, `download: ${guestPath}: ${errorMessage(err)}`);
           return 1;
@@ -396,12 +396,11 @@ export function createHostCommands(deps: HostCommandDeps): CommandsOption {
   };
 }
 
-/** Trigger a browser file download for raw bytes. */
-export function triggerBrowserDownload(bytes: Uint8Array, filename: string): void {
-  const blob = new Blob([bytes.slice()]);
+/** Download the guest file or archive using the name returned by the transfer. */
+export function triggerBrowserDownload(file: File): void {
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
+  a.href = URL.createObjectURL(file);
+  a.download = file.name;
   document.body.append(a);
   a.click();
   a.remove();
