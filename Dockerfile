@@ -8,6 +8,7 @@ RUN bun install --frozen-lockfile
 
 COPY tsconfig.json vite.config.ts index.html ./
 COPY public ./public
+COPY guest ./guest
 COPY src ./src
 COPY server ./server
 COPY scripts ./scripts

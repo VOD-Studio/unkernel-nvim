@@ -40,6 +40,7 @@ import {
   type PtySize,
   type WasiExecServer,
 } from "unkernel";
+import { installDebianTools } from "./debian-tools.ts";
 import { DEFAULT_DISTRO, DISTROS, isDistro, releaseGuestAssetPath, type Distro } from "./distro.ts";
 import {
   KernelLogBuffer,
@@ -954,6 +955,11 @@ export class VmManager {
     window.addEventListener("pagehide", () => {
       void this.syncDisk();
     });
+    if (distro === "debian") {
+      await installDebianTools(vm).catch((error: unknown) => {
+        this.#onNotice?.(`Debian 工具切换不可用：${error instanceof Error ? error.message : String(error)}`, 6000);
+      });
+    }
     return vm;
   }
 
