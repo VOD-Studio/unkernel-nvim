@@ -1490,6 +1490,7 @@ export class VmManager {
           echo "未找到命令: $1（可在终端或启动器安装桌面应用包）" >&2
           exit 127
         fi
+        app=$1
         lodpi_flag=$2
         shift 2
         if [ "$lodpi_flag" = "1" ]; then
@@ -1506,7 +1507,7 @@ export class VmManager {
             export WAYLAND_DISPLAY="$lodpi_sock"
           fi
         fi
-        setsid /usr/lib/kw/bin/wland "$@" </dev/null >/tmp/wland-app.log 2>&1 &
+        setsid /usr/lib/kw/bin/wland "$app" "$@" </dev/null >/tmp/wland-app.log 2>&1 &
         `,
         "launch-wayland",
         target,
