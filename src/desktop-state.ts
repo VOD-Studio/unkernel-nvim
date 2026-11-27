@@ -40,6 +40,7 @@ export interface DesktopAppPreset {
   id: string;
   name: string;
   description: string;
+  group: "工作区" | "实用工具" | "图形与兼容";
   command: string;
   args: readonly string[];
   category: "terminal" | "files" | "editor" | "image" | "document" | "archive" | "calculator" | "graphics" | "x11";
@@ -51,8 +52,9 @@ export interface DesktopAppPreset {
 export const DESKTOP_APP_PRESETS: readonly DesktopAppPreset[] = [
   {
     id: "foot",
-    name: "Foot 终端",
-    description: "原生 Wayland 高帧率终端模拟器",
+    name: "Foot",
+    description: "Wayland 终端",
+    group: "工作区",
     command: "foot",
     args: [],
     category: "terminal",
@@ -60,8 +62,9 @@ export const DESKTOP_APP_PRESETS: readonly DesktopAppPreset[] = [
   },
   {
     id: "pcmanfm",
-    name: "PCManFM 文件管理器",
-    description: "轻量 GTK 文件浏览器（查看 /workspace 与本地挂载）",
+    name: "PCManFM",
+    description: "工作区文件管理器",
+    group: "工作区",
     command: "pcmanfm",
     args: ["/workspace"],
     category: "files",
@@ -69,8 +72,9 @@ export const DESKTOP_APP_PRESETS: readonly DesktopAppPreset[] = [
   },
   {
     id: "mousepad",
-    name: "Mousepad 编辑器",
-    description: "轻量图形文本与代码编辑器",
+    name: "Mousepad",
+    description: "文本与代码编辑器",
+    group: "工作区",
     command: "mousepad",
     args: [],
     category: "editor",
@@ -80,6 +84,7 @@ export const DESKTOP_APP_PRESETS: readonly DesktopAppPreset[] = [
     id: "ristretto",
     name: "Ristretto",
     description: "图片浏览器",
+    group: "实用工具",
     command: "ristretto",
     args: [],
     category: "image",
@@ -88,7 +93,8 @@ export const DESKTOP_APP_PRESETS: readonly DesktopAppPreset[] = [
   {
     id: "zathura",
     name: "Zathura",
-    description: "Vim 键位 PDF 阅读器",
+    description: "用 Vim 键位读 PDF",
+    group: "实用工具",
     command: "zathura",
     args: [],
     category: "document",
@@ -98,6 +104,7 @@ export const DESKTOP_APP_PRESETS: readonly DesktopAppPreset[] = [
     id: "xarchiver",
     name: "Xarchiver",
     description: "压缩与解压文件",
+    group: "实用工具",
     command: "xarchiver",
     args: [],
     category: "archive",
@@ -107,6 +114,7 @@ export const DESKTOP_APP_PRESETS: readonly DesktopAppPreset[] = [
     id: "galculator",
     name: "Galculator",
     description: "科学计算器",
+    group: "实用工具",
     command: "galculator",
     args: [],
     category: "calculator",
@@ -114,8 +122,9 @@ export const DESKTOP_APP_PRESETS: readonly DesktopAppPreset[] = [
   },
   {
     id: "glmark2",
-    name: "glmark2 (Wayland GL)",
-    description: "使用 virgl + WebGL2 渲染的 OpenGL ES 2.0 基准测试",
+    name: "glmark2",
+    description: "OpenGL ES 基准测试",
+    group: "图形与兼容",
     command: "glmark2-es2-wayland",
     args: [],
     category: "graphics",
@@ -124,8 +133,9 @@ export const DESKTOP_APP_PRESETS: readonly DesktopAppPreset[] = [
   },
   {
     id: "xterm",
-    name: "XTerm (Xwayland)",
-    description: "通过 xwayland-satellite 运行经典 X11 应用（默认 1× LoDPI 兼容缩放）",
+    name: "XTerm",
+    description: "X11 终端 · 1× 缩放",
+    group: "图形与兼容",
     command: "xterm",
     args: [],
     category: "x11",

@@ -378,7 +378,7 @@ export class ModalController {
           </button>
           <button class="modal-btn" id="btn-open-launcher" type="button">
             <span>Wayland 应用启动器</span>
-            <span class="modal-btn-desc">运行或一键安装 foot / pcmanfm / X11 应用</span>
+            <span class="modal-btn-desc">浏览桌面应用、运行命令或安装推荐工具</span>
           </button>
         </div>
         <div class="row-bar">

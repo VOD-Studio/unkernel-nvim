@@ -1918,144 +1918,517 @@ body.desktop-mode .win-resize-handle {
   flex: none;
 }
 
-/* App Launcher */
-.launcher-backdrop:not([hidden]) {
+/* App launcher */
+.launcher-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 48;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: clamp(8px, 3vmin, 28px);
+  border: 0;
+  background: transparent;
+  color: var(--clay-bright);
+}
+
+.launcher-backdrop[open] {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 20px;
-  background: rgba(10, 10, 10, 0.68);
-  backdrop-filter: blur(6px);
+}
+
+.launcher-backdrop::backdrop {
+  background: rgb(10 9 9 / 65%);
+  backdrop-filter: blur(7px);
   animation: modal-fade 120ms ease-out;
 }
 
 .launcher-dialog {
-  width: min(640px, 100%);
-  max-height: calc(100dvh - 48px);
+  --launcher-pad: clamp(16px, 3.5vw, 28px);
+  --launcher-accent: #edac90;
+  width: min(752px, 100%);
+  max-height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 18px 20px;
-  background: var(--clay-float);
-  border: 1px solid var(--clay-float-border);
-  border-radius: 10px;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.72);
+  overflow: hidden;
+  background: radial-gradient(ellipse 80% 175px at 12% 0, #362a25, transparent), #1c1b1a;
+  border: 1px solid #4b403b;
+  border-radius: 18px;
+  box-shadow: 0 24px 80px #0009, inset 0 1px 0 #ffffff0b;
 }
 
-.launcher-header {
+.launcher-hero {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 14px;
+  padding: 25px var(--launcher-pad) 21px;
+}
+
+.launcher-hero::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 0 0 0 45%;
+  background: radial-gradient(circle, #e6ad8e42 1px, transparent 1.2px) 0 0 / 7px 7px;
+  mask-image: linear-gradient(105deg, transparent 4%, #0009 95%), linear-gradient(#000, transparent);
+  mask-composite: intersect;
+  pointer-events: none;
+}
+
+.launcher-hero h2 {
+  margin: 0;
+  font-size: clamp(22px, 3vw, 26px);
+  line-height: 1.2;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+}
+
+.launcher-status {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin: 6px 0 0;
+  color: #bab0a9;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.launcher-status::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex: none;
+  align-self: center;
+  border-radius: 50%;
+  background: #9cc6a1;
+}
+
+.launcher-status.unavailable::before {
+  background: #dfaa74;
+}
+
+.launcher-close,
+.launcher-command button,
+.launcher-install button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  flex: none;
+  cursor: pointer;
+  font: inherit;
+  white-space: nowrap;
+}
+
+.launcher-close svg,
+.launcher-command svg,
+.launcher-install svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.launcher-close {
+  align-self: flex-start;
+  margin-left: auto;
+  min-height: 30px;
+  padding: 3px 8px;
+  border: 1px solid #ffffff18;
+  border-radius: 7px;
+  background: #211f1ec9;
+  color: #c1b9b3;
+}
+
+.launcher-close kbd {
+  font: 11px var(--font-mono);
+}
+
+.launcher-command {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 12px;
+  margin: 0 var(--launcher-pad);
+  padding: 5px 6px 5px 14px;
+  border: 1px solid #4e4540;
+  border-radius: 10px;
+  background: #141413;
+}
+
+.launcher-command:focus-within {
+  border-color: #a67760;
+  box-shadow: 0 0 0 2px #d9775714;
+}
+
+.launcher-command > svg {
+  width: 20px;
+  height: 20px;
+  color: var(--launcher-accent);
+}
+
+.launcher-command input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--clay-bright);
+  font: 13px var(--font-mono);
+}
+
+.launcher-command input::placeholder {
+  color: #a19891;
+}
+
+.launcher-command button {
+  height: 32px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--launcher-accent);
+  color: #301e16;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.launcher-command button:hover:enabled {
+  background: #f3bea5;
+}
+
+.launcher-error {
+  max-height: 4em;
+  overflow-y: auto;
+  margin: 9px var(--launcher-pad) 0;
+  color: #efb095;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.launcher-error:empty {
+  display: none;
+}
+
+.launcher-library {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.launcher-toolbar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 20px var(--launcher-pad) 12px;
+}
+
+.launcher-filters,
+.launcher-grid {
+  min-inline-size: 0;
+  margin: 0;
+  border: 0;
+}
+
+.launcher-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  padding: 0;
+}
+
+.launcher-filters label {
+  position: relative;
+  cursor: pointer;
+}
+
+.launcher-filters input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.launcher-filters span {
+  display: block;
+  padding: 5px 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: #b8b0aa;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.launcher-filters label:hover span {
+  background: #ffffff09;
+}
+
+.launcher-filters input:checked + span {
+  border-color: #664a3e;
+  background: #3e2e27;
+  color: #f0b79d;
+}
+
+.launcher-count {
+  color: #aaa19b;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.launcher-scroll {
+  /* Keep the filters and footer in place when a category has fewer cards. */
+  height: 282px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #615650 transparent;
+}
+
+.launcher-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-content: start;
+  gap: 9px;
+  padding: 2px var(--launcher-pad) 22px;
+}
+
+.launcher-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  min-height: 80px;
+  padding: 14px;
+  border: 1px solid #383431;
+  border-radius: 11px;
+  background: linear-gradient(120deg, #292725, #232221);
+  color: var(--clay-bright);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease, transform 120ms ease;
+}
+
+.launcher-card:hover:not(:disabled) {
+  border-color: #7e6153;
+  background: #302b28;
+  transform: translateY(-1px);
+}
+
+.launcher-card:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.launcher-dialog button:disabled,
+.launcher-lodpi:has(input:disabled) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.app-icon-card {
+  width: 44px;
+  height: 44px;
+  padding: 8px;
+  border: 1px solid #ffffff21;
+  border-radius: 12px;
+  box-shadow: inset 0 1px 0 #ffffff0f, 0 2px 4px #0002;
+}
+
+.launcher-mark.app-icon {
+  width: 48px;
+  height: 48px;
+  padding: 10px;
+  border-color: #85604e;
+  border-radius: 14px;
+  background: linear-gradient(140deg, #674434, #322824);
+}
+
+.launcher-card-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.launcher-card-title {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.launcher-card-desc {
+  font-size: 12px;
+  line-height: 1.45;
+  text-wrap: balance;
+  color: #b6ada6;
+}
+
+.launcher-options {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  flex: none;
+  padding: 13px var(--launcher-pad);
+  border-top: 1px solid #393431;
+  background: #191817;
+}
+
+.launcher-lodpi {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #c9c1bb;
+  cursor: pointer;
+}
+
+.launcher-lodpi input {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  width: 30px;
+  height: 18px;
+  margin: 0;
+  padding: 2px;
+  border: 1px solid #655b55;
+  border-radius: 12px;
+  background: #373330;
+  cursor: inherit;
+}
+
+.launcher-lodpi input::before {
+  content: "";
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #c4bab3;
+}
+
+.launcher-lodpi input:checked {
+  justify-content: flex-end;
+  border-color: #d29577;
+  background: #ac7156;
+}
+
+.launcher-lodpi input:checked::before {
+  background: #fff1e9;
+}
+
+.launcher-install {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #a79e98;
+  font-size: 11px;
+}
+
+.launcher-install button {
+  min-height: 33px;
+  padding: 0 12px;
+  border: 1px solid #57483f;
+  border-radius: 7px;
+  background: #302923;
+  color: #e8c7b6;
+  font-size: 12px;
+}
+
+.launcher-install button:hover:enabled,
+.launcher-close:hover {
+  background: #3d322b;
+  border-color: #8c6c59;
+}
+
+.launcher-dialog button:focus-visible,
+.launcher-lodpi input:focus-visible,
+.launcher-filters input:focus-visible + span {
+  outline: 2px solid var(--launcher-accent);
+  outline-offset: 1px;
+}
+
+@media (max-width: 660px) {
+  .launcher-scroll { height: 460px; }
+  .launcher-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 460px) {
+  .launcher-hero { gap: 10px; padding-block: 18px; }
+  .launcher-mark.app-icon { width: 41px; height: 41px; padding: 8px; }
+  .launcher-command { gap: 7px; padding-left: 10px; }
+  .launcher-command input { font: 12px var(--font-sans); }
+  .launcher-toolbar { padding-top: 14px; }
+  .launcher-filters span { padding-inline: 7px; }
+  .launcher-scroll { height: 376px; }
+  .launcher-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+  .launcher-card { flex-direction: column; gap: 7px; min-height: 100px; padding: 10px 5px; text-align: center; }
+  .launcher-card-title { font-size: 13px; }
+  .launcher-card-desc { font-size: 11px; }
+  .app-icon-card { width: 36px; height: 36px; padding: 6px; border-radius: 10px; }
+  .launcher-install { flex-direction: column-reverse; align-items: flex-end; gap: 3px; }
+}
+
+@media (max-height: 440px) {
+  .launcher-dialog { display: block; overflow-y: auto; }
+  .launcher-scroll { height: auto; overflow: visible; }
+}
+
+@media (max-width: 350px) {
+  .launcher-filters span { padding-inline: 4px; }
+  .launcher-close kbd { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .launcher-backdrop::backdrop { animation: none; }
+  .launcher-card { transition: none; }
+  .launcher-card:hover:not(:disabled) { transform: none; }
+}
+
+/* Wallpaper picker */
+.wallpaper-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
 }
 
-.launcher-title {
+.wallpaper-title {
   margin: 0;
   font-size: 16px;
   font-weight: 600;
   color: var(--clay-bright);
 }
 
-.launcher-note {
+.wallpaper-note {
   margin: 4px 0 0;
   font-size: 12px;
   color: var(--clay-muted);
 }
 
-.launcher-form {
+.wallpaper-form {
   display: flex;
   gap: 8px;
 }
 
-.launcher-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 8px;
-  overflow: auto;
-}
-
-.launcher-card {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
-  padding: 10px 12px;
-  border: 1px solid var(--clay-border);
-  border-radius: 7px;
-  background: var(--clay-bg);
-  color: var(--clay-bright);
-  text-align: left;
-  cursor: pointer;
-}
-
-.launcher-card:hover:not(:disabled) {
-  background: var(--clay-elevated);
-  border-color: var(--clay-float-border);
-}
-
-.launcher-card:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.launcher-card-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-}
-
-.app-icon-card {
-  width: 36px;
-  height: 36px;
-  padding: 7px;
-  border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
-}
-
-.launcher-card-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.launcher-card-title {
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.launcher-card-desc {
-  font-size: 12px;
-  line-height: 1.4;
-  color: var(--clay-muted);
-}
-
-.launcher-card-cmd {
-  margin-top: 2px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--clay-accent);
-}
-
-.launcher-lodpi {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--clay-secondary);
-  cursor: pointer;
-}
-
-.launcher-lodpi input {
-  accent-color: var(--clay-accent);
-}
-
-.launcher-footer {
+.wallpaper-footer {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -2065,7 +2438,6 @@ body.desktop-mode .win-resize-handle {
   border-top: 1px solid var(--clay-border);
 }
 
-/* Wallpaper Picker Dialog */
 .wallpaper-backdrop:not([hidden]) {
   position: fixed;
   inset: 0;

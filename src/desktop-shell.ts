@@ -220,10 +220,14 @@ export class DesktopShell {
   readonly #contextMenuEl = document.getElementById("desktop-context-menu")!;
   readonly #wallpaperEl = document.getElementById("desktop-wallpaper")!;
   readonly #wallpaperScrimEl = document.getElementById("desktop-wallpaper-scrim")!;
-  readonly #launcherBackdropEl = document.getElementById("desktop-launcher-backdrop")!;
+  readonly #launcherBackdropEl = document.getElementById("desktop-launcher-backdrop") as HTMLDialogElement;
   readonly #launcherFormEl = document.getElementById("desktop-launcher-form") as HTMLFormElement;
   readonly #launcherInputEl = document.getElementById("desktop-launcher-input") as HTMLInputElement;
-  readonly #launcherGridEl = document.getElementById("desktop-launcher-grid")!;
+  readonly #launcherRunBtn = document.getElementById("btn-run-launcher-command") as HTMLButtonElement;
+  readonly #launcherFiltersEl = document.getElementById("desktop-launcher-filters")!;
+  readonly #launcherGridEl = document.getElementById("desktop-launcher-grid") as HTMLFieldSetElement;
+  readonly #launcherCountEl = document.getElementById("desktop-launcher-count")!;
+  readonly #launcherErrorEl = document.getElementById("desktop-launcher-error")!;
   readonly #launcherLodpiEl = document.getElementById("launcher-lodpi-toggle") as HTMLInputElement;
   readonly #launcherInstallBtn = document.getElementById("btn-desktop-install-apps") as HTMLButtonElement;
   readonly #launcherDistroNoteEl = document.getElementById("desktop-launcher-note")!;
@@ -256,7 +260,6 @@ export class DesktopShell {
   #customWallpaperUrl: string | null = null;
   #customWallpaperName: string | undefined =
     this.#wallpaperConfig.source.kind === "custom" ? this.#wallpaperConfig.source.name : undefined;
-  #launcherOpen = false;
   #wallpaperOpen = false;
   #launchingApp = false;
   #nextZ = 20;
@@ -373,7 +376,7 @@ export class DesktopShell {
   }
 
   get isLauncherOpen(): boolean {
-    return this.#launcherOpen;
+    return this.#launcherBackdropEl.open;
   }
 
   get isWallpaperOpen(): boolean {
@@ -381,7 +384,7 @@ export class DesktopShell {
   }
 
   get isOverlayOpen(): boolean {
-    return this.#launcherOpen || this.#wallpaperOpen;
+    return this.isLauncherOpen || this.#wallpaperOpen;
   }
 
   getWallpaperSummary(): string {
@@ -443,18 +446,18 @@ export class DesktopShell {
     }
     this.closeWallpaperPicker();
     this.blurInputs();
-    this.#launcherOpen = true;
-    this.#renderLauncherContent();
-    this.#launcherBackdropEl.hidden = false;
+    this.#launcherErrorEl.textContent = "";
+    this.#updateLauncherControls();
+    this.#renderLauncherApps();
+    this.#launcherBackdropEl.showModal();
     this.renderStatus();
     this.#launcherInputEl.focus();
     this.#launcherInputEl.select();
   }
 
   closeLauncher(): void {
-    if (!this.#launcherOpen) return;
-    this.#launcherOpen = false;
-    this.#launcherBackdropEl.hidden = true;
+    if (!this.isLauncherOpen) return;
+    this.#launcherBackdropEl.close();
     this.renderStatus();
     if (!this.#isModalOpen() && !this.#wallpaperOpen) {
       this.restoreFocus();
@@ -462,7 +465,7 @@ export class DesktopShell {
   }
 
   toggleLauncher(): void {
-    if (this.#launcherOpen) this.closeLauncher();
+    if (this.isLauncherOpen) this.closeLauncher();
     else this.openLauncher();
   }
 
@@ -488,7 +491,7 @@ export class DesktopShell {
     this.#wallpaperOpen = false;
     this.#wallpaperBackdropEl.hidden = true;
     this.renderStatus();
-    if (!this.#isModalOpen() && !this.#launcherOpen) {
+    if (!this.#isModalOpen() && !this.isLauncherOpen) {
       this.restoreFocus();
     }
   }
@@ -591,8 +594,9 @@ export class DesktopShell {
   setWaylandLodpi(enabled: boolean): void {
     this.#waylandLodpi = enabled;
     localStorage.setItem(WAYLAND_LODPI_STORAGE_KEY, enabled ? "1" : "0");
-    if (this.#launcherOpen) {
+    if (this.isLauncherOpen) {
       this.#launcherLodpiEl.checked = enabled;
+      this.#renderLauncherApps();
     }
     this.#onStateChange?.();
   }
@@ -1108,6 +1112,26 @@ export class DesktopShell {
   }
 
   #initLauncher(): void {
+    renderDesktopIcon(document.getElementById("desktop-launcher-mark")!, "launcher", "card");
+    const groups = new Set(["全部", ...DESKTOP_APP_PRESETS.map((preset) => preset.group)]);
+    for (const group of groups) {
+      const label = document.createElement("label");
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = "launcher-group";
+      radio.value = group;
+      radio.checked = group === "全部";
+      radio.addEventListener("change", () => this.#renderLauncherApps());
+      const caption = document.createElement("span");
+      caption.textContent = group;
+      label.append(radio, caption);
+      this.#launcherFiltersEl.append(label);
+    }
+
+    this.#launcherBackdropEl.addEventListener("cancel", (e) => {
+      e.preventDefault();
+      this.closeLauncher();
+    });
     this.#launcherBackdropEl.addEventListener("mousedown", (e) => {
       if (e.target === this.#launcherBackdropEl) {
         this.closeLauncher();
@@ -1137,34 +1161,37 @@ export class DesktopShell {
       }
       this.closeLauncher();
       this.#raiseTerminalWindow(true);
-      void this.#onOpenInstallInShell(buildDebianDesktopInstallCommand());
+      void this.#onOpenInstallInShell(buildDebianDesktopInstallCommand()).catch((err) => {
+        this.#toast(err instanceof Error ? err.message : String(err), 5000);
+      });
     });
   }
 
-  #renderLauncherContent(): void {
+  #updateLauncherControls(): void {
     const isDebian = this.#vmManager.activeDistro === "debian";
-    const gpuOn = this.#vmManager.activeGpuEnabled;
-
     this.#launcherDistroNoteEl.textContent = isDebian
-      ? gpuOn
-        ? "Debian Wayland + VirtIO-GPU / WebGL2 / Vulkan 已启用"
-        : "Debian Wayland 已就绪（共享内存渲染；可在控制中心开启 GPU 加速）"
-      : "当前为 Alpine 发行版：Wayland 桌面应用需切换至 Debian（控制中心 → 虚拟机与诊断）";
-    this.#launcherInstallBtn.disabled = !isDebian || this.#launchingApp;
+      ? `Debian Wayland · ${this.#vmManager.activeGpuEnabled ? "GPU 加速" : "共享内存渲染"}`
+      : "当前为 Alpine，请在控制中心切换至 Debian";
+    this.#launcherDistroNoteEl.classList.toggle("unavailable", !isDebian);
+    const disabled = !isDebian || this.#launchingApp;
+    this.#launcherGridEl.disabled = disabled;
+    this.#launcherInstallBtn.disabled = disabled;
+    this.#launcherRunBtn.disabled = disabled;
+    this.#launcherInputEl.disabled = disabled;
+    this.#launcherLodpiEl.disabled = disabled;
     this.#launcherLodpiEl.checked = this.#waylandLodpi;
+  }
 
-    this.#launcherGridEl.replaceChildren();
-    for (const preset of DESKTOP_APP_PRESETS) {
+  #renderLauncherApps(): void {
+    const group = this.#launcherFiltersEl.querySelector<HTMLInputElement>("input:checked")!.value;
+    const presets = DESKTOP_APP_PRESETS.filter((preset) => group === "全部" || preset.group === group);
+    const cards = presets.map((preset) => {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "launcher-card";
-      btn.disabled = !isDebian || this.#launchingApp;
-
-      const head = document.createElement("div");
-      head.className = "launcher-card-head";
-
-      const iconEl = createDesktopIconElement(resolvePresetIcon(preset), "card");
-      const meta = document.createElement("div");
+      const lodpi = Boolean(preset.lodpi || this.#waylandLodpi);
+      btn.title = [lodpi ? "wland-lodpi" : "wland", preset.command, ...preset.args].join(" ");
+      const meta = document.createElement("span");
       meta.className = "launcher-card-meta";
 
       const title = document.createElement("span");
@@ -1173,39 +1200,43 @@ export class DesktopShell {
 
       const desc = document.createElement("span");
       desc.className = "launcher-card-desc";
-      desc.textContent = preset.requiresGpu && !gpuOn
-        ? `${preset.description}（建议开启 GPU 加速）`
+      desc.textContent = preset.requiresGpu && !this.#vmManager.activeGpuEnabled
+        ? "图形基准 · 推荐 GPU"
         : preset.description;
 
       meta.append(title, desc);
-      head.append(iconEl, meta);
-
-      const cmd = document.createElement("code");
-      cmd.className = "launcher-card-cmd";
-      cmd.textContent = `${preset.lodpi ? "wland-lodpi" : "wland"} ${[preset.command, ...preset.args].join(" ")}`;
-
-      btn.append(head, cmd);
+      btn.append(createDesktopIconElement(resolvePresetIcon(preset), "card"), meta);
       btn.addEventListener("click", () => {
-        void this.#launchCommand(preset.command, preset.args, Boolean(preset.lodpi || this.#launcherLodpiEl.checked));
+        void this.#launchCommand(preset.command, preset.args, lodpi);
       });
-      this.#launcherGridEl.appendChild(btn);
-    }
+      return btn;
+    });
+    this.#launcherGridEl.replaceChildren(...cards);
+    this.#launcherCountEl.textContent = `${cards.length} 个应用`;
   }
 
   async #launchCommand(command: string, args: readonly string[], lodpi = false): Promise<void> {
     if (this.#launchingApp) return;
     this.#launchingApp = true;
-    this.#renderLauncherContent();
+    this.#launcherErrorEl.textContent = "";
+    this.#updateLauncherControls();
     try {
       await this.bridge.ensureReady();
       await this.#vmManager.launchWaylandApp(command, args, { lodpi });
       this.closeLauncher();
       this.#toast(`正在启动 ${command}${lodpi ? " (1× LoDPI)" : ""}…`);
     } catch (err) {
-      this.#toast(err instanceof Error ? err.message : String(err), 5000);
+      const message = err instanceof Error ? err.message : String(err);
+      if (this.isLauncherOpen) this.#launcherErrorEl.textContent = message;
+      else this.#toast(message, 5000);
     } finally {
       this.#launchingApp = false;
-      if (this.#launcherOpen) this.#renderLauncherContent();
+      if (this.isLauncherOpen) {
+        this.#updateLauncherControls();
+        if (!this.#launcherBackdropEl.contains(document.activeElement) || document.activeElement === this.#launcherBackdropEl) {
+          this.#launcherInputEl.focus();
+        }
+      }
     }
   }
 
@@ -1264,11 +1295,6 @@ export class DesktopShell {
           e.stopPropagation();
           this.closeWallpaperPicker();
           return;
-        }
-        if (this.#launcherOpen && e.key === "Escape") {
-          e.preventDefault();
-          e.stopPropagation();
-          this.closeLauncher();
         }
       },
       true,
@@ -2020,8 +2046,8 @@ export class DesktopShell {
       this.#dockTerminalBadgeEl.hidden = true;
     }
 
-    this.#dockLauncherBtn.classList.toggle("active", this.#launcherOpen);
-    this.#dockLauncherBtn.setAttribute("aria-pressed", String(this.#launcherOpen));
+    this.#dockLauncherBtn.classList.toggle("active", this.isLauncherOpen);
+    this.#dockLauncherBtn.setAttribute("aria-pressed", String(this.isLauncherOpen));
 
     const previewCount = this.#previewWindows.size;
     this.#dockPreviewBtn.classList.toggle("running", previewCount > 0);
@@ -2504,7 +2530,7 @@ export class DesktopShell {
           { kind: "heading", label: "应用启动器" },
           {
             kind: "action",
-            label: this.#launcherOpen ? "关闭应用启动器" : "打开应用启动器",
+            label: this.isLauncherOpen ? "关闭应用启动器" : "打开应用启动器",
             kbd: `${modPrefix}K`,
             onSelect: () => this.toggleLauncher(),
           },
