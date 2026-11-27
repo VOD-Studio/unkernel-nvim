@@ -4,6 +4,7 @@ import { describe, expect, test } from "bun:test";
 import type { HostCommandContext } from "unkernel";
 import {
   createHostCommands,
+  parseDesktopArgs,
   parseOpenUrl,
   parsePreviewArgs,
   resolveGuestPath,
@@ -305,5 +306,37 @@ describe("createHostCommands", () => {
     expect(await cmds.mount!(makeMockContext({ name: "mount", args: ["--list"] }).ctx)).toBe(
       "/workspace/a\n/workspace/b\n",
     );
+  });
+
+  test("parseDesktopArgs and desktop command control desktop mode and launcher", async () => {
+    expect(parseDesktopArgs([])).toEqual({ action: "toggle" });
+    expect(parseDesktopArgs(["on"])).toEqual({ action: "on" });
+    expect(parseDesktopArgs(["off"])).toEqual({ action: "off" });
+    expect(parseDesktopArgs(["launcher"])).toEqual({ action: "launcher" });
+    expect(parseDesktopArgs(["status"])).toEqual({ action: "status" });
+    expect(parseDesktopArgs(["bad"]).action).toBe("error");
+
+    const calls: string[] = [];
+    const cmds = createHostCommands(
+      makeMockDeps({
+        setDesktopMode: (on) => calls.push(`set:${on}`),
+        toggleDesktopMode: () => calls.push("toggle"),
+        openLauncher: () => calls.push("launcher"),
+        getDesktopStatus: () => ({ desktopMode: true, waylandState: "connected", windowCount: 2 }),
+      }),
+    );
+
+    expect(await cmds.desktop!(makeMockContext({ name: "desktop", args: ["on"] }).ctx)).toContain("已进入桌面环境");
+    expect(await cmds.desktop!(makeMockContext({ name: "desktop", args: ["launcher"] }).ctx)).toContain("应用启动器");
+    expect(await cmds.desktop!(makeMockContext({ name: "desktop", args: [] }).ctx)).toContain("已切换桌面模式");
+    expect(await cmds.desktop!(makeMockContext({ name: "desktop", args: ["off"] }).ctx)).toContain("全屏终端");
+    expect(await cmds.desktop!(makeMockContext({ name: "desktop", args: ["status"] }).ctx)).toBe(
+      "desktop=on wayland=connected windows=2\n",
+    );
+    expect(calls).toEqual(["set:true", "launcher", "toggle", "set:false"]);
+
+    const bad = makeMockContext({ name: "desktop", args: ["nope"] });
+    expect(await cmds.desktop!(bad.ctx)).toBe(2);
+    expect(bad.stderr()).toContain("未知参数");
   });
 });

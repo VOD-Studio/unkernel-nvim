@@ -5,6 +5,8 @@
 
 import { formatDiskGiB, GIB, MAX_DISK_GIB, parseDiskGiB } from "./disk-config.ts";
 import { formatByteSize } from "./diagnostics.ts";
+import { formatWaylandScale, WAYLAND_SCALE_PRESETS } from "./desktop-state.ts";
+import type { DesktopDisplayConfig } from "./desktop-shell.ts";
 import { DISTROS, isDistro } from "./distro.ts";
 import { isDirectoryPickerSupported, pickHostDirectory } from "./fs-bridge.ts";
 import {
@@ -20,6 +22,7 @@ import { formatFetchRoutesText, parseFetchRoutesText } from "./net-routes.ts";
 import { type CanvasTerminal } from "./terminal.ts";
 import { MAX_TERMINAL_SESSIONS, type SessionMode } from "./terminal-sessions.ts";
 import { getSameOriginWispUrl, type NetMode, type VmManager } from "./vm-manager.ts";
+import type { WaylandBridgeStatus } from "./wayland-bridge.ts";
 
 const MODAL_TABS = ["workspace", "storage", "system"] as const;
 type ModalTab = (typeof MODAL_TABS)[number];
@@ -43,6 +46,19 @@ export interface ModalControllerOptions {
   onOpenSession: (mode: SessionMode, opts?: { cwd?: string; replaceActive?: boolean }) => Promise<void>;
   onSelectSession: (id: string) => void;
   onCloseSession: (id: string) => Promise<void>;
+  isDesktopMode?: () => boolean;
+  onToggleDesktop?: () => void;
+  onOpenLauncher?: () => void;
+  getWaylandStatus?: () => WaylandBridgeStatus | undefined;
+  getDesktopDisplayConfig?: () => DesktopDisplayConfig;
+  onSetWaylandScale?: (scale: number | null) => void;
+  onSetBrowserFullscreen?: (enabled: boolean) => boolean;
+  onSetWaylandLodpi?: (enabled: boolean) => void;
+  getWallpaperSummary?: () => string;
+  onOpenWallpaperPicker?: () => void;
+  onCycleWallpaper?: () => void;
+  onBeforeOpen?: () => void;
+  onAfterClose?: () => void;
   toast: (msg: string) => void;
 }
 
@@ -57,6 +73,19 @@ export class ModalController {
   #onOpenSession: (mode: SessionMode, opts?: { cwd?: string; replaceActive?: boolean }) => Promise<void>;
   #onSelectSession: (id: string) => void;
   #onCloseSession: (id: string) => Promise<void>;
+  #isDesktopMode?: () => boolean;
+  #onToggleDesktop?: () => void;
+  #onOpenLauncher?: () => void;
+  #getWaylandStatus?: () => WaylandBridgeStatus | undefined;
+  #getDesktopDisplayConfig?: () => DesktopDisplayConfig;
+  #onSetWaylandScale?: (scale: number | null) => void;
+  #onSetBrowserFullscreen?: (enabled: boolean) => boolean;
+  #onSetWaylandLodpi?: (enabled: boolean) => void;
+  #getWallpaperSummary?: () => string;
+  #onOpenWallpaperPicker?: () => void;
+  #onCycleWallpaper?: () => void;
+  #onBeforeOpen?: () => void;
+  #onAfterClose?: () => void;
   #tab: ModalTab = "workspace";
   #open = false;
   #pillHidden = localStorage.getItem("unkernel-nvim.hidePill") === "1";
@@ -79,6 +108,19 @@ export class ModalController {
     this.#onOpenSession = opts.onOpenSession;
     this.#onSelectSession = opts.onSelectSession;
     this.#onCloseSession = opts.onCloseSession;
+    this.#isDesktopMode = opts.isDesktopMode;
+    this.#onToggleDesktop = opts.onToggleDesktop;
+    this.#onOpenLauncher = opts.onOpenLauncher;
+    this.#getWaylandStatus = opts.getWaylandStatus;
+    this.#getDesktopDisplayConfig = opts.getDesktopDisplayConfig;
+    this.#onSetWaylandScale = opts.onSetWaylandScale;
+    this.#onSetBrowserFullscreen = opts.onSetBrowserFullscreen;
+    this.#onSetWaylandLodpi = opts.onSetWaylandLodpi;
+    this.#getWallpaperSummary = opts.getWallpaperSummary;
+    this.#onOpenWallpaperPicker = opts.onOpenWallpaperPicker;
+    this.#onCycleWallpaper = opts.onCycleWallpaper;
+    this.#onBeforeOpen = opts.onBeforeOpen;
+    this.#onAfterClose = opts.onAfterClose;
 
     if (this.#pillHidden) {
       this.#pill.classList.add("hidden-pill");
@@ -138,6 +180,7 @@ export class ModalController {
 
   open(tab: ModalTab = this.#tab): void {
     if (!this.#vmManager.vm) return;
+    this.#onBeforeOpen?.();
     this.#open = true;
     this.render();
     this.#backdrop.classList.remove("hidden");
@@ -151,7 +194,8 @@ export class ModalController {
     this.#stopSystemStatsTimer();
     this.#backdrop.classList.add("hidden");
     this.#dialog.querySelector("#modal-feedback")!.textContent = "";
-    this.#terminal.focus();
+    if (this.#onAfterClose) this.#onAfterClose();
+    else this.#terminal.focus();
   }
 
   render(): void {
@@ -328,6 +372,14 @@ export class ModalController {
             <span>Guest 端口预览</span>
             <span class="modal-btn-desc">打开虚拟机内的网页与开发服务器</span>
           </button>
+          <button class="modal-btn ${this.#isDesktopMode?.() ? "primary" : ""}" id="btn-toggle-desktop" type="button">
+            <span>${this.#isDesktopMode?.() ? "返回全屏终端" : "进入桌面环境 (Wayland)"}</span>
+            <span class="modal-btn-desc">浮动终端窗口 + wland Linux GUI 应用</span>
+          </button>
+          <button class="modal-btn" id="btn-open-launcher" type="button">
+            <span>Wayland 应用启动器</span>
+            <span class="modal-btn-desc">运行或一键安装 foot / pcmanfm / X11 应用</span>
+          </button>
         </div>
         <div class="row-bar">
           <span class="row-label">终端快捷键</span>
@@ -335,7 +387,9 @@ export class ModalController {
             <kbd>Ctrl+⇧+←/→</kbd>
             <span class="row-hint">切换标签</span>
             <kbd>Ctrl+⇧+\\</kbd>
-            <span class="row-hint">快速切 Shell</span>
+            <span class="row-hint">切 Shell</span>
+            <kbd>Ctrl+⇧+D</kbd>
+            <span class="row-hint">切桌面</span>
           </div>
         </div>
         <div class="row-bar">
@@ -353,6 +407,16 @@ export class ModalController {
             <button class="mini-btn" id="btn-toggle-pill" type="button" role="switch" aria-labelledby="label-menu-pill" aria-checked="${!this.#pillHidden}">
               ${this.#pillHidden ? "隐藏" : "显示"}
             </button>
+          </div>
+        </div>
+        <div class="row-bar">
+          <div class="row-label-group">
+            <span class="row-label">桌面壁纸</span>
+            <span class="row-hint">当前：${escapeHtml(this.#getWallpaperSummary?.() ?? "赤陶余烬")}</span>
+          </div>
+          <div class="row-controls">
+            <button class="mini-btn" id="btn-cycle-wallpaper" type="button">下一张</button>
+            <button class="mini-btn active" id="btn-open-wallpaper" type="button">更换壁纸…</button>
           </div>
         </div>
       </div>
@@ -507,6 +571,35 @@ export class ModalController {
     const shmDetail = diag.shm.enabled
       ? `读 ${formatByteSize(diag.shm.bytesRead)} / 写 ${formatByteSize(diag.shm.bytesWritten)}`
       : "需要跨源隔离或 kwshm";
+    const waylandStatus = this.#getWaylandStatus?.();
+    const waylandValue = waylandStatus
+      ? (waylandStatus.state === "connected"
+          ? `已连接 (${waylandStatus.windowCount} 窗口)`
+          : waylandStatus.state === "loading"
+            ? "正在加载 wland…"
+            : waylandStatus.state === "ready"
+              ? "已就绪 (待应用)"
+              : waylandStatus.state === "unsupported"
+                ? "不支持 (无 kwshm)"
+                : waylandStatus.state === "error"
+                  ? "错误"
+                  : "按需待命")
+      : "—";
+    const waylandDetail = waylandStatus?.error
+      ? waylandStatus.error
+      : `SHM ${waylandStatus?.shmMode ?? "none"} · ${formatWaylandScale(waylandStatus?.scale ?? null, waylandStatus?.effectiveScale)}${waylandStatus?.gpuDmabuf ? " · virgl dmabuf" : ""}${waylandStatus?.vkExternal ? " · vk" : ""}`;
+    const gpuValue = diag.gpu.enabled
+      ? (diag.gpu.glState === "ready" ? "WebGL2 / Vulkan 就绪" : `已启用 (GL: ${diag.gpu.glState})`)
+      : "基础显示器与音频 (未启用 3D GPU)";
+    const gpuDetail = diag.gpu.enabled
+      ? `${diag.gpu.glRenderer ?? "GL 按需加载"}${diag.gpu.soundState !== "disabled" ? ` · 音频 ${diag.gpu.soundState}` : ""}`
+      : `/dev/fb0 已就绪${diag.gpu.soundState !== "disabled" ? ` · 音频 ${diag.gpu.soundState}` : ""} · 开启 GPU 可加速 3D`;
+    const displayCfg = this.#getDesktopDisplayConfig?.() ?? {
+      scale: waylandStatus?.scale ?? null,
+      effectiveScale: waylandStatus?.effectiveScale ?? 1,
+      browserFullscreen: waylandStatus?.browserFullscreen ?? false,
+      lodpi: false,
+    };
 
     panel.innerHTML = `
       ${
@@ -563,6 +656,16 @@ export class ModalController {
             <div class="stat-key">共享内存 (SHM)</div>
             <div class="stat-val" id="stat-shm-mode">${escapeHtml(shmValue)}</div>
             <div class="stat-detail" id="stat-shm-io">${escapeHtml(shmDetail)}</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-key">Wayland 桌面 (wland)</div>
+            <div class="stat-val" id="stat-wayland-state">${escapeHtml(waylandValue)}</div>
+            <div class="stat-detail" id="stat-wayland-detail">${escapeHtml(waylandDetail)}</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-key">GPU 与音频设备</div>
+            <div class="stat-val" id="stat-gpu-state">${escapeHtml(gpuValue)}</div>
+            <div class="stat-detail" id="stat-gpu-detail">${escapeHtml(gpuDetail)}</div>
           </div>
         </div>
       </div>
@@ -624,6 +727,49 @@ export class ModalController {
               ).join("")}
             </select>
           </div>
+        </div>
+        <div class="row-bar">
+          <div class="row-label-group">
+            <span class="row-label" id="label-gpu-accel">3D 图形硬件加速 (virtio-gpu / WebGL2 / Vulkan)</span>
+            <span class="row-hint" id="hint-gpu-accel">${distro === "debian" ? "基础虚拟显示器 (/dev/fb0) 与 ALSA 音频默认可用；开启后额外提供 virtio-gpu (WebGL2) 与 Vulkan (WebGPU)。" : "仅 Debian 发行版支持 virtio-gpu 与 Vulkan 硬件加速。"}</span>
+          </div>
+          <button class="mini-btn" id="btn-toggle-gpu" type="button" role="switch"
+            aria-labelledby="label-gpu-accel" aria-describedby="hint-gpu-accel"
+            aria-checked="${this.#vmManager.gpuEnabled}" ${distro !== "debian" ? "disabled" : ""}>
+            ${this.#vmManager.gpuEnabled ? "开启" : "关闭"}
+          </button>
+        </div>
+        <div class="row-bar">
+          <div class="row-label-group">
+            <span class="row-label">桌面缩放 (Wayland Scale)</span>
+            <span class="row-hint">实时调整 Wayland 应用缩放倍率（当前 ${escapeHtml(formatWaylandScale(displayCfg.scale, displayCfg.effectiveScale))}）</span>
+          </div>
+          <div class="row-controls" role="group" aria-label="桌面缩放">
+            <button class="mini-btn" aria-pressed="${displayCfg.scale === null}" data-wayland-scale="auto" type="button">自动</button>
+            ${WAYLAND_SCALE_PRESETS.map((s) =>
+              `<button class="mini-btn" aria-pressed="${displayCfg.scale === s}" data-wayland-scale="${s}" type="button">${s}×</button>`
+            ).join("")}
+          </div>
+        </div>
+        <div class="row-bar">
+          <div class="row-label-group">
+            <span class="row-label" id="label-browser-fs">全屏窗口联动浏览器全屏 (browserFullscreen)</span>
+            <span class="row-hint">Wayland 应用进入全屏状态时同步触发浏览器全屏</span>
+          </div>
+          <button class="mini-btn" id="btn-toggle-browser-fs" type="button" role="switch"
+            aria-labelledby="label-browser-fs" aria-checked="${displayCfg.browserFullscreen}">
+            ${displayCfg.browserFullscreen ? "开启" : "关闭"}
+          </button>
+        </div>
+        <div class="row-bar">
+          <div class="row-label-group">
+            <span class="row-label" id="label-wayland-lodpi">默认 1× LoDPI 兼容模式 (X11 / SDL)</span>
+            <span class="row-hint">通过 <code>wayland-0-lodpi</code> 启动应用，避免老旧 X11/SDL 程序在 HiDPI 屏幕下过小或发虚</span>
+          </div>
+          <button class="mini-btn" id="btn-toggle-wayland-lodpi" type="button" role="switch"
+            aria-labelledby="label-wayland-lodpi" aria-checked="${displayCfg.lodpi}">
+            ${displayCfg.lodpi ? "开启" : "关闭"}
+          </button>
         </div>
         <div class="row-bar">
           <div class="row-label-group">
@@ -817,6 +963,18 @@ export class ModalController {
       this.#onOpenPreview();
     });
 
+    q("#btn-toggle-desktop")?.addEventListener("click", () => {
+      if (this.#diskAction) return;
+      this.close();
+      this.#onToggleDesktop?.();
+    });
+
+    q("#btn-open-launcher")?.addEventListener("click", () => {
+      if (this.#diskAction) return;
+      this.close();
+      this.#onOpenLauncher?.();
+    });
+
     const fontLabel = panel.querySelector("#label-font-size")!;
     const resizeFont = (delta: number) => {
       this.#terminal.setFontSize(this.#terminal.getFontSize() + delta);
@@ -832,6 +990,18 @@ export class ModalController {
       this.#pill.classList.toggle("hidden-pill", this.#pillHidden);
       pillToggle.setAttribute("aria-checked", String(!this.#pillHidden));
       pillToggle.textContent = this.#pillHidden ? "隐藏" : "显示";
+    });
+
+    q("#btn-cycle-wallpaper")?.addEventListener("click", () => {
+      this.#onCycleWallpaper?.();
+      this.#renderWorkspace();
+      panel.querySelector<HTMLButtonElement>("#btn-cycle-wallpaper")?.focus();
+    });
+
+    q("#btn-open-wallpaper")?.addEventListener("click", () => {
+      if (this.#diskAction) return;
+      this.close();
+      this.#onOpenWallpaperPicker?.();
     });
   }
 
@@ -931,7 +1101,44 @@ export class ModalController {
     distroSelect.addEventListener("change", () => {
       if (!isDistro(distroSelect.value)) return;
       this.#vmManager.setDistro(distroSelect.value);
-      this.#renderRestart();
+      this.#renderSystem();
+      q<HTMLSelectElement>("#select-distro")?.focus();
+    });
+
+    q<HTMLButtonElement>("#btn-toggle-gpu")?.addEventListener("click", () => {
+      const next = !this.#vmManager.gpuEnabled;
+      this.#vmManager.setGpuEnabled(next);
+      this.#renderSystem();
+      q<HTMLButtonElement>("#btn-toggle-gpu")?.focus();
+    });
+
+    for (const btn of panel.querySelectorAll<HTMLButtonElement>("[data-wayland-scale]")) {
+      btn.addEventListener("click", () => {
+        const raw = btn.dataset.waylandScale;
+        const next = !raw || raw === "auto" ? null : Number(raw);
+        if (next !== null && !Number.isFinite(next)) return;
+        this.#onSetWaylandScale?.(next);
+        this.#renderSystem();
+        q<HTMLButtonElement>(`[data-wayland-scale="${raw}"]`)?.focus();
+      });
+    }
+
+    q<HTMLButtonElement>("#btn-toggle-browser-fs")?.addEventListener("click", () => {
+      const current = this.#getDesktopDisplayConfig?.().browserFullscreen ?? false;
+      const next = !current;
+      const immediate = this.#onSetBrowserFullscreen?.(next) ?? true;
+      this.#renderSystem();
+      if (!immediate) {
+        this.#toast("已保存全屏联动设置，将在下次启动 Wayland 合成器时生效");
+      }
+      q<HTMLButtonElement>("#btn-toggle-browser-fs")?.focus();
+    });
+
+    q<HTMLButtonElement>("#btn-toggle-wayland-lodpi")?.addEventListener("click", () => {
+      const current = this.#getDesktopDisplayConfig?.().lodpi ?? false;
+      this.#onSetWaylandLodpi?.(!current);
+      this.#renderSystem();
+      q<HTMLButtonElement>("#btn-toggle-wayland-lodpi")?.focus();
     });
 
     const cpuSelect = q<HTMLSelectElement>("#select-vcpus")!;
@@ -1143,6 +1350,41 @@ export class ModalController {
         ? `读 ${formatByteSize(diag.shm.bytesRead)} / 写 ${formatByteSize(diag.shm.bytesWritten)}`
         : "需要跨源隔离或 kwshm",
     );
+    const waylandStatus = this.#getWaylandStatus?.();
+    setText(
+      "#stat-wayland-state",
+      waylandStatus
+        ? (waylandStatus.state === "connected"
+            ? `已连接 (${waylandStatus.windowCount} 窗口)`
+            : waylandStatus.state === "loading"
+              ? "正在加载 wland…"
+              : waylandStatus.state === "ready"
+                ? "已就绪 (待应用)"
+                : waylandStatus.state === "unsupported"
+                  ? "不支持 (无 kwshm)"
+                  : waylandStatus.state === "error"
+                    ? "错误"
+                    : "按需待命")
+        : "—",
+    );
+    setText(
+      "#stat-wayland-detail",
+      waylandStatus?.error
+        ? waylandStatus.error
+        : `SHM ${waylandStatus?.shmMode ?? "none"} · ${formatWaylandScale(waylandStatus?.scale ?? null, waylandStatus?.effectiveScale)}${waylandStatus?.gpuDmabuf ? " · virgl dmabuf" : ""}${waylandStatus?.vkExternal ? " · vk" : ""}`,
+    );
+    setText(
+      "#stat-gpu-state",
+      diag.gpu.enabled
+        ? (diag.gpu.glState === "ready" ? "WebGL2 / Vulkan 就绪" : `已启用 (GL: ${diag.gpu.glState})`)
+        : "基础显示器与音频 (未启用 3D GPU)",
+    );
+    setText(
+      "#stat-gpu-detail",
+      diag.gpu.enabled
+        ? `${diag.gpu.glRenderer ?? "GL 按需加载"}${diag.gpu.soundState !== "disabled" ? ` · 音频 ${diag.gpu.soundState}` : ""}`
+        : `/dev/fb0 已就绪${diag.gpu.soundState !== "disabled" ? ` · 音频 ${diag.gpu.soundState}` : ""} · 开启 GPU 可加速 3D`,
+    );
   }
 
   #setMemoryConfig(next: MemoryConfigMiB): void {
@@ -1164,6 +1406,7 @@ export class ModalController {
     }
     const settings = [
       this.#vmManager.hasPendingDistroChange() ? "发行版" : null,
+      this.#vmManager.hasPendingGpuChange() ? "图形与音频加速" : null,
       this.#vmManager.hasPendingCpuChange() ? "CPU 核数" : null,
       this.#vmManager.hasPendingMemoryChange() ? "内存配额" : null,
       this.#vmManager.hasPendingNetworkChange() ? "Wisp 网络" : null,

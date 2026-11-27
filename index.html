@@ -15,8 +15,203 @@
     />
   </head>
   <body>
-    <!-- Fullscreen 100vw x 100vh WebGL2 Terminal Stage -->
-    <main id="terminal-stage" aria-label="Neovim Terminal Canvas"></main>
+    <!-- Desktop Top Status Bar (visible only in Desktop Mode) -->
+    <header id="desktop-topbar" class="desktop-topbar" hidden>
+      <div class="desktop-topbar-left">
+        <button id="btn-exit-desktop" class="topbar-brand-btn" type="button" title="返回全屏终端 (Ctrl+Shift+D / ⌘+Shift+D)">
+          <span class="boot-dot"></span>
+          <span>unkernel desktop</span>
+        </button>
+        <span class="desktop-topbar-sep" aria-hidden="true"></span>
+        <span id="desktop-topbar-title" class="desktop-topbar-title">终端</span>
+      </div>
+      <div class="desktop-topbar-right">
+        <span id="desktop-topbar-meta" class="desktop-topbar-meta">Debian · SHM · Wayland 待命</span>
+        <button id="btn-desktop-launcher" class="topbar-btn" type="button" title="应用启动器 (Ctrl+Shift+K / ⌘+Shift+K)">应用</button>
+        <button id="btn-desktop-mute" class="topbar-btn" type="button" hidden>音频</button>
+        <button id="btn-desktop-control" class="topbar-btn" type="button" title="控制中心 (Ctrl+Shift+P / ⌘+Shift+P)">控制中心</button>
+        <span id="desktop-topbar-clock" class="desktop-topbar-clock"></span>
+      </div>
+    </header>
+
+    <!-- Unified Stage: Fullscreen Terminal by default; Desktop Wallpaper + Window Layer in Desktop Mode -->
+    <div id="desktop-stage" class="desktop-stage">
+      <div id="desktop-wallpaper" class="desktop-wallpaper" aria-hidden="true"></div>
+      <div id="desktop-wallpaper-scrim" class="desktop-wallpaper-scrim" aria-hidden="true"></div>
+      <div id="desktop-wland-layer" class="desktop-wland-layer">
+        <div id="desktop-windows-layer" class="desktop-windows-layer">
+          <!-- Terminal / Neovim Window (fullscreen in default mode; floating window in Desktop Mode) -->
+          <section id="terminal-window" class="terminal-window" aria-label="Neovim 终端窗口">
+            <header id="terminal-win-bar" class="terminal-win-bar">
+              <span id="terminal-win-icon" class="win-title-icon" aria-hidden="true"></span>
+              <span id="terminal-win-title" class="terminal-win-title">Neovim / Shell</span>
+              <div id="terminal-win-tabs-slot" class="terminal-win-tabs-slot"></div>
+              <div class="win-controls">
+                <button id="btn-term-minimize" class="win-ctrl" type="button" title="最小化">―</button>
+                <button id="btn-term-maximize" class="win-ctrl" type="button" title="最大化 / 还原">□</button>
+                <button id="btn-term-fullscreen" class="win-ctrl" type="button" title="切换至全屏终端">⤢</button>
+              </div>
+            </header>
+            <main id="terminal-stage" aria-label="Neovim Terminal Canvas"></main>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <!-- Desktop Bottom Floating Dock (visible only in Desktop Mode) -->
+    <nav id="desktop-dock" class="desktop-dock" aria-label="桌面任务栏" hidden>
+      <div class="dock-section dock-section-pinned">
+        <button
+          id="dock-btn-terminal"
+          class="dock-item running"
+          type="button"
+          aria-label="Neovim / 终端"
+          data-dock-tooltip="Neovim / 终端"
+        >
+          <span class="dock-icon-wrap" id="dock-icon-terminal" aria-hidden="true"></span>
+          <span class="dock-badge" id="dock-badge-terminal" hidden></span>
+          <span class="dock-indicator" aria-hidden="true"></span>
+        </button>
+        <button
+          id="dock-btn-launcher"
+          class="dock-item"
+          type="button"
+          aria-label="应用启动器"
+          data-dock-tooltip="应用启动器"
+        >
+          <span class="dock-icon-wrap" id="dock-icon-launcher" aria-hidden="true"></span>
+          <span class="dock-indicator" aria-hidden="true"></span>
+        </button>
+      </div>
+      <span class="dock-sep" aria-hidden="true"></span>
+      <div id="desktop-dock-apps" class="dock-section desktop-dock-apps"></div>
+      <span class="dock-sep dock-sep-apps" aria-hidden="true"></span>
+      <div class="dock-section dock-section-tools">
+        <button
+          id="dock-btn-preview"
+          class="dock-item"
+          type="button"
+          aria-label="Guest 端口预览"
+          data-dock-tooltip="Guest 端口预览"
+        >
+          <span class="dock-icon-wrap" id="dock-icon-preview" aria-hidden="true"></span>
+          <span class="dock-badge" id="dock-badge-preview" hidden></span>
+          <span class="dock-indicator" aria-hidden="true"></span>
+        </button>
+        <button
+          id="dock-btn-settings"
+          class="dock-item"
+          type="button"
+          aria-label="控制中心"
+          data-dock-tooltip="控制中心"
+        >
+          <span class="dock-icon-wrap" id="dock-icon-settings" aria-hidden="true"></span>
+          <span class="dock-indicator" aria-hidden="true"></span>
+        </button>
+        <button
+          id="dock-btn-fullscreen"
+          class="dock-item"
+          type="button"
+          aria-label="返回全屏终端"
+          data-dock-tooltip="返回全屏终端"
+        >
+          <span class="dock-icon-wrap" id="dock-icon-fullscreen" aria-hidden="true"></span>
+          <span class="dock-indicator" aria-hidden="true"></span>
+        </button>
+      </div>
+    </nav>
+    <div id="desktop-dock-tooltip" class="dock-tooltip" role="tooltip" hidden></div>
+    <div id="desktop-context-menu" class="desktop-context-menu" role="menu" hidden></div>
+
+    <!-- App Launcher Overlay -->
+    <div id="desktop-launcher-backdrop" class="launcher-backdrop" role="dialog" aria-modal="true" aria-labelledby="launcher-title" hidden>
+      <div class="launcher-dialog">
+        <header class="launcher-header">
+          <div>
+            <h2 id="launcher-title" class="launcher-title">Wayland 应用启动器</h2>
+            <p id="desktop-launcher-note" class="launcher-note"></p>
+          </div>
+          <button id="btn-close-launcher" class="modal-close" type="button">关闭 <kbd>Esc</kbd></button>
+        </header>
+        <form id="desktop-launcher-form" class="launcher-form">
+          <input
+            id="desktop-launcher-input"
+            class="text-input"
+            type="text"
+            placeholder="输入要通过 wland 启动的命令，例如 foot、pcmanfm、xeyes…"
+            spellcheck="false"
+            autocomplete="off"
+          />
+          <button class="mini-btn active" type="submit">启动</button>
+        </form>
+        <div id="desktop-launcher-grid" class="launcher-grid"></div>
+        <label class="launcher-lodpi">
+          <input id="launcher-lodpi-toggle" type="checkbox" />
+          <span>以 1× LoDPI 兼容模式启动（适合 X11 / SDL / 非 HiDPI 应用）</span>
+        </label>
+        <footer class="launcher-footer">
+          <span class="row-hint">支持 Wayland 原生应用与 Xwayland（需 Debian 发行版 + Wisp 联网安装软件包）</span>
+          <button id="btn-desktop-install-apps" class="mini-btn active" type="button">一键安装推荐桌面应用</button>
+        </footer>
+      </div>
+    </div>
+
+    <!-- Desktop Wallpaper Picker Overlay -->
+    <div id="desktop-wallpaper-backdrop" class="wallpaper-backdrop" role="dialog" aria-modal="true" aria-labelledby="wallpaper-title" hidden>
+      <div class="wallpaper-dialog">
+        <header class="launcher-header">
+          <div>
+            <h2 id="wallpaper-title" class="launcher-title">桌面壁纸</h2>
+            <p id="desktop-wallpaper-note" class="launcher-note"></p>
+          </div>
+          <button id="btn-close-wallpaper" class="modal-close" type="button">关闭 <kbd>Esc</kbd></button>
+        </header>
+        <div class="wallpaper-section">
+          <div class="wallpaper-section-title">内置精选</div>
+          <div id="desktop-wallpaper-grid" class="wallpaper-grid"></div>
+        </div>
+        <div class="wallpaper-section">
+          <div class="wallpaper-section-title">自定义图片</div>
+          <div class="wallpaper-custom-row">
+            <button id="btn-wallpaper-upload" class="mini-btn active" type="button">选择本地图片…</button>
+            <button id="btn-wallpaper-use-custom" class="mini-btn" type="button" hidden>使用已保存图片</button>
+            <button id="btn-wallpaper-clear-custom" class="mini-btn" type="button" hidden>清除本地图片</button>
+            <input id="desktop-wallpaper-file" type="file" accept="image/png,image/jpeg,image/webp,image/avif,image/gif,image/svg+xml" hidden />
+          </div>
+          <form id="desktop-wallpaper-url-form" class="launcher-form">
+            <input
+              id="desktop-wallpaper-url-input"
+              class="text-input"
+              type="url"
+              placeholder="或输入图片地址，例如 https://example.com/wallpaper.jpg"
+              spellcheck="false"
+              autocomplete="off"
+            />
+            <button class="mini-btn" type="submit">应用链接</button>
+          </form>
+        </div>
+        <div class="wallpaper-controls">
+          <div class="wallpaper-control-row">
+            <span class="row-label">填充模式</span>
+            <div id="desktop-wallpaper-fit-group" class="row-controls" role="group" aria-label="壁纸填充模式"></div>
+          </div>
+          <label class="wallpaper-slider-row" for="desktop-wallpaper-dim">
+            <span class="row-label">暗化遮罩</span>
+            <input id="desktop-wallpaper-dim" type="range" min="0" max="75" step="5" value="0" />
+            <span id="desktop-wallpaper-dim-val" class="row-unit">0%</span>
+          </label>
+          <label class="wallpaper-slider-row" for="desktop-wallpaper-blur">
+            <span class="row-label">背景模糊</span>
+            <input id="desktop-wallpaper-blur" type="range" min="0" max="24" step="1" value="0" />
+            <span id="desktop-wallpaper-blur-val" class="row-unit">0px</span>
+          </label>
+        </div>
+        <footer class="launcher-footer">
+          <span class="row-hint">本地图片保存在浏览器 IndexedDB，刷新页面后自动保留</span>
+          <button id="btn-wallpaper-reset" class="mini-btn" type="button">恢复默认</button>
+        </footer>
+      </div>
+    </div>
 
     <section class="guest-preview" id="guest-preview" aria-label="Guest 端口预览" hidden>
       <form class="guest-preview-toolbar">
@@ -54,6 +249,15 @@
     <!-- Floating control center trigger & session tabs -->
     <div class="floating-hud" id="floating-hud">
       <div class="session-tabs" id="session-tabs" role="tablist" aria-label="终端会话"></div>
+      <button
+        id="btn-enter-desktop"
+        class="menu-pill desktop-pill"
+        type="button"
+        title="切换桌面环境 (Ctrl+Shift+D / ⌘+Shift+D)"
+        aria-pressed="false"
+      >
+        <span>桌面</span>
+      </button>
       <button
         id="menu-pill"
         class="menu-pill"

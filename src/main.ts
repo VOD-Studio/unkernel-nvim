@@ -2,6 +2,7 @@
 // Application entry point: wires the fullscreen WebGL2 Canvas terminal,
 // WorkerKernel VM manager, boot progress overlay, and modal control center.
 
+import { DesktopShell } from "./desktop-shell.ts";
 import { type DiskMode } from "./disk-config.ts";
 import { DISTROS } from "./distro.ts";
 import { pickHostDirectory } from "./fs-bridge.ts";
@@ -65,7 +66,10 @@ function showToast(message: string, durationMs = 3200): void {
 function hideBootOverlay(): void {
   if (bootOverlayEl.classList.contains("fade-out")) return;
   bootOverlayEl.classList.add("fade-out");
-  if (!modal?.isOpen) terminal.focus();
+  if (!modal?.isOpen && !desktopShell?.isOverlayOpen) {
+    if (desktopShell) desktopShell.restoreFocus();
+    else terminal.focus();
+  }
 }
 
 function updateBootOverlay(s: BootStatusUpdate): void {
@@ -81,6 +85,9 @@ function updateBootOverlay(s: BootStatusUpdate): void {
   }
   if (s.phase === "suspended") {
     modal?.close();
+    desktopShell?.closeLauncher();
+    desktopShell?.closeWallpaperPicker();
+    desktopShell?.detachVm();
     preview.close();
     terminal.unmountAll();
     renderSessionHud();
@@ -96,6 +103,7 @@ function updateBootOverlay(s: BootStatusUpdate): void {
 }
 
 let modal: ModalController | null = null;
+let desktopShell: DesktopShell | null = null;
 let togglingQuickSession = false;
 
 function renderSessionHud(): void {
@@ -168,8 +176,9 @@ function mountSession(session: TerminalSession, activate: boolean): void {
 function switchToSession(id: string): void {
   const session = vmManager.switchSession(id);
   if (!session) return;
-  terminal.activateSession(session.id, !modal?.isOpen);
+  terminal.activateSession(session.id, !modal?.isOpen && !desktopShell?.isOverlayOpen);
   renderSessionHud();
+  desktopShell?.renderStatus();
   if (modal?.isOpen) modal.render();
 }
 
@@ -183,7 +192,8 @@ async function openNewSession(
   });
   mountSession(session, true);
   renderSessionHud();
-  if (!modal?.isOpen) terminal.focus();
+  desktopShell?.renderStatus();
+  if (!modal?.isOpen && !desktopShell?.isOverlayOpen) terminal.focus();
 }
 
 async function closeSessionTab(id: string): Promise<void> {
@@ -191,9 +201,10 @@ async function closeSessionTab(id: string): Promise<void> {
   if (!res) return;
   terminal.unmountSession(id);
   if (res.nextActive) {
-    terminal.activateSession(res.nextActive.id, !modal?.isOpen);
+    terminal.activateSession(res.nextActive.id, !modal?.isOpen && !desktopShell?.isOverlayOpen);
   }
   renderSessionHud();
+  desktopShell?.renderStatus();
   if (modal?.isOpen) modal.render();
 }
 
@@ -255,8 +266,12 @@ const terminal = new CanvasTerminal({
 const vmManager = new VmManager({
   onStatus: updateBootOverlay,
   onNotice: showToast,
+  onDisplayChange: (mode) => desktopShell?.handleDisplayMode(mode),
+  onInputChange: (state) => desktopShell?.handleInputState(state),
+  onAudioStateChange: (state) => desktopShell?.handleAudioStateChange(state),
   onSessionsChange: () => {
     renderSessionHud();
+    desktopShell?.renderStatus();
     if (modal?.isOpen) modal.render();
   },
   onSessionExit: (session) => {
@@ -273,7 +288,31 @@ const vmManager = new VmManager({
   },
 });
 
-const preview = new GuestPreview(() => vmManager.vm, () => terminal.focus());
+const preview = new GuestPreview(() => vmManager.vm, () => desktopShell?.restoreFocus() ?? terminal.focus());
+
+desktopShell = new DesktopShell({
+  vmManager,
+  terminal,
+  isModalOpen: () => Boolean(modal?.isOpen),
+  onOpenModal: () => modal?.open(),
+  onOpenSession: (mode) => openNewSession(mode),
+  onOpenInstallInShell: async (command) => {
+    await openNewSession("shell", { cwd: "/workspace" });
+    await vmManager.activePty?.write(`${command}\n`);
+  },
+  onDesktopModeChange: (enabled) => {
+    if (enabled && preview.isOpen) {
+      const port = preview.currentPort;
+      const path = preview.currentPath;
+      preview.close();
+      desktopShell?.openPreview(port !== null ? { port, path } : undefined);
+    }
+  },
+  onStateChange: () => {
+    if (modal?.isOpen) modal.render();
+  },
+  toast: showToast,
+});
 
 const updateVisibility = () => vmManager.updatePageVisibility();
 document.addEventListener("visibilitychange", updateVisibility);
@@ -294,9 +333,18 @@ vmManager.setCommands(
       }
       await navigator.clipboard.writeText(text);
     },
-    openPreview: () => preview.open(),
-    closePreview: () => preview.close(),
-    navigatePreview: (port, path) => preview.openAt(port, path),
+    openPreview: () => {
+      if (desktopShell?.isDesktopMode) desktopShell.openPreview();
+      else preview.open();
+    },
+    closePreview: () => {
+      preview.close();
+      desktopShell?.closeAllPreviews();
+    },
+    navigatePreview: (port, path) => {
+      if (desktopShell?.isDesktopMode) desktopShell.openPreview({ port, path });
+      else preview.openAt(port, path);
+    },
     openUrl: (url) => Boolean(window.open(url, "_blank", "noopener,noreferrer")),
     readGuestFile: (guestPath, signal) => vmManager.readGuestFile(guestPath, signal),
     readDownload: (guestPath, signal) => vmManager.readDownload(guestPath, signal),
@@ -312,6 +360,17 @@ vmManager.setCommands(
       return entry.guestPath;
     },
     listMounts: () => [...vmManager.mountedFolders.keys()],
+    setDesktopMode: (enabled) => desktopShell?.setDesktopMode(enabled),
+    toggleDesktopMode: () => desktopShell?.toggleDesktopMode(),
+    openLauncher: () => desktopShell?.openLauncher(),
+    getDesktopStatus: () => {
+      const st = desktopShell?.getBridgeStatus();
+      return {
+        desktopMode: desktopShell?.isDesktopMode ?? false,
+        waylandState: st?.state ?? "idle",
+        windowCount: st?.windowCount ?? 0,
+      };
+    },
     notify: showToast,
   }),
 );
@@ -338,10 +397,32 @@ modal = new ModalController({
   pill: pillBtn,
   vmManager,
   terminal,
-  onOpenPreview: () => preview.open(),
+  onOpenPreview: () => {
+    if (desktopShell?.isDesktopMode) desktopShell.openPreview();
+    else preview.open();
+  },
   onOpenSession: openNewSession,
   onSelectSession: switchToSession,
   onCloseSession: closeSessionTab,
+  isDesktopMode: () => desktopShell?.isDesktopMode ?? false,
+  onToggleDesktop: () => desktopShell?.toggleDesktopMode(),
+  onOpenLauncher: () => desktopShell?.openLauncher(),
+  getWaylandStatus: () => desktopShell?.getBridgeStatus(),
+  getDesktopDisplayConfig: () => desktopShell!.getDisplayConfig(),
+  onSetWaylandScale: (scale) => desktopShell?.setWaylandScale(scale),
+  onSetBrowserFullscreen: (enabled) => desktopShell?.setBrowserFullscreen(enabled) ?? true,
+  onSetWaylandLodpi: (enabled) => desktopShell?.setWaylandLodpi(enabled),
+  getWallpaperSummary: () => desktopShell?.getWallpaperSummary() ?? "赤陶余烬",
+  onOpenWallpaperPicker: () => desktopShell?.openWallpaperPicker(),
+  onCycleWallpaper: () => desktopShell?.cycleWallpaper(),
+  onBeforeOpen: () => {
+    desktopShell?.blurInputs();
+    queueMicrotask(() => desktopShell?.renderStatus());
+  },
+  onAfterClose: () => {
+    desktopShell?.restoreFocus();
+    desktopShell?.renderStatus();
+  },
   toast: showToast,
 });
 
@@ -365,6 +446,9 @@ async function bootApp(diskMode?: DiskMode): Promise<void> {
 
     const size = terminal.getSize();
     const restored = await vmManager.boot(size.cols, size.rows, size, { diskMode });
+    if (vmManager.vm) {
+      desktopShell?.attachVm(vmManager.vm);
+    }
     if (vmManager.isSnapshotMode) {
       bootBadgeEl.textContent = `${bootBadgeEl.textContent} · 内存快照`;
     }
@@ -431,5 +515,7 @@ void bootApp();
   vmManager,
   terminal,
   modal,
+  desktopShell,
+  waylandBridge: desktopShell.bridge,
 };
 

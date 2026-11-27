@@ -230,7 +230,7 @@ export default defineConfig({
     format: "es",
   },
   optimizeDeps: {
-    exclude: ["unkernel"],
+    exclude: ["unkernel", "wland"],
   },
   build: {
     target: "esnext",

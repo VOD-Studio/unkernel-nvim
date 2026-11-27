@@ -7,6 +7,7 @@ import {
   bundledKernelUrl,
   checkSupport,
   ConsoleRouter,
+  createAudioOut,
   createKernel,
   decodeKwsparse,
   decodeSnapshot,
@@ -26,10 +27,14 @@ import {
   snapshotDiskMismatch,
   webCpuBlocker,
   WorkerKernel,
+  type AudioOut,
+  type AudioOutState,
   type BootProgress,
   type CommandsOption,
   type DeviceKind,
   type DiskSpec,
+  type DisplayMode,
+  type InputState,
   type InstanceStats,
   type KernelHandle,
   type KernelSnapshot,
@@ -42,6 +47,7 @@ import {
 } from "unkernel";
 import { BackgroundSuspend, backgroundSuspendEnabled, holdUntilShown } from "./background-suspend.ts";
 import { installDebianTools } from "./debian-tools.ts";
+import { GPU_ENABLED_STORAGE_KEY, parseStoredBoolean } from "./desktop-state.ts";
 import { DEFAULT_DISTRO, DISTROS, isDistro, releaseGuestAssetPath, type Distro } from "./distro.ts";
 import {
   KernelLogBuffer,
@@ -242,6 +248,11 @@ export class VmManager {
   readonly cpuLimit = this.cpuBlocker ? 1 : Math.min(navigator.hardwareConcurrency || 1, MAX_CPUS);
   #distro = loadDistro();
   #bootDistro: Distro | null = null;
+  #gpuEnabled = parseStoredBoolean(localStorage.getItem(GPU_ENABLED_STORAGE_KEY), false);
+  #bootGpuEnabled: boolean | null = null;
+  #audioOut: AudioOut | null = null;
+  #displayMode: DisplayMode | null = null;
+  #inputState: InputState = { keyboard: false, mouse: false, tablet: false };
   #cpuCount = this.#loadCpuCount();
   #bootCpuCount: number | null = null;
   #onlineCpuCount: number | null = null;
@@ -365,6 +376,60 @@ export class VmManager {
     return this.#bootDistro ?? this.#distro;
   }
 
+  get gpuEnabled(): boolean {
+    return this.#gpuEnabled;
+  }
+
+  get activeGpuEnabled(): boolean {
+    return this.#bootGpuEnabled ?? (this.activeDistro === "debian" && this.#gpuEnabled);
+  }
+
+  setGpuEnabled(enabled: boolean): void {
+    localStorage.setItem(GPU_ENABLED_STORAGE_KEY, enabled ? "1" : "0");
+    this.#gpuEnabled = enabled;
+  }
+
+  hasPendingGpuChange(): boolean {
+    if (!this.vm || this.#bootGpuEnabled === null) return false;
+    const nextEffective = this.#distro === "debian" && this.#gpuEnabled;
+    return nextEffective !== this.#bootGpuEnabled;
+  }
+
+  get audioOut(): AudioOut | null {
+    return this.#audioOut;
+  }
+
+  get audioState(): AudioOutState | "disabled" {
+    return this.#audioOut ? this.#audioOut.state : "disabled";
+  }
+
+  get displayMode(): DisplayMode | null {
+    return this.#displayMode;
+  }
+
+  get inputState(): InputState {
+    return this.#inputState;
+  }
+
+  isAudioMuted(): boolean {
+    return this.#audioOut?.muted ?? false;
+  }
+
+  toggleAudioMute(): boolean {
+    if (!this.#audioOut) return false;
+    this.#audioOut.muted = !this.#audioOut.muted;
+    this.#onSessionsChange?.();
+    return this.#audioOut.muted;
+  }
+
+  resumeAudio(): void {
+    if (!this.#audioOut) return;
+    this.#audioOut.muted = false;
+    this.#audioOut.resume();
+    this.#onAudioStateChange?.(this.#audioOut.state);
+    this.#onSessionsChange?.();
+  }
+
   get shellPath(): string {
     return this.#shellPath ?? DEFAULT_SHELL;
   }
@@ -474,7 +539,8 @@ export class VmManager {
 
   hasPendingRestartChanges(): boolean {
     return this.hasPendingDistroChange() || this.hasPendingCpuChange() ||
-      this.hasPendingMemoryChange() || this.hasPendingNetworkChange() || this.hasPendingDiskSizeChange();
+      this.hasPendingMemoryChange() || this.hasPendingNetworkChange() ||
+      this.hasPendingDiskSizeChange() || this.hasPendingGpuChange();
   }
 
   get diskSize(): number {
@@ -524,19 +590,38 @@ export class VmManager {
   #onSessionExit?: (session: TerminalSession, end: PtyEnd) => void;
   #onSessionsChange?: () => void;
   #onNotice?: (message: string, durationMs?: number) => void;
+  #onDisplayChange?: (mode: DisplayMode | null) => void;
+  #onInputChange?: (state: InputState) => void;
+  #onAudioStateChange?: (state: AudioOutState) => void;
 
   constructor(opts: {
     onStatus: (s: BootStatusUpdate) => void;
     onSessionExit?: (session: TerminalSession, end: PtyEnd) => void;
     onSessionsChange?: () => void;
     onNotice?: (message: string, durationMs?: number) => void;
+    onDisplayChange?: (mode: DisplayMode | null) => void;
+    onInputChange?: (state: InputState) => void;
+    onAudioStateChange?: (state: AudioOutState) => void;
     commands?: CommandsOption;
   }) {
     this.#onStatus = opts.onStatus;
     this.#onSessionExit = opts.onSessionExit;
     this.#onSessionsChange = opts.onSessionsChange;
     this.#onNotice = opts.onNotice;
+    this.#onDisplayChange = opts.onDisplayChange;
+    this.#onInputChange = opts.onInputChange;
+    this.#onAudioStateChange = opts.onAudioStateChange;
     this.#commands = opts.commands;
+  }
+
+  #handleDisplayMode(mode: DisplayMode | null): void {
+    this.#displayMode = mode;
+    this.#onDisplayChange?.(mode);
+  }
+
+  #handleInputState(state: InputState): void {
+    this.#inputState = state;
+    this.#onInputChange?.(state);
   }
 
   #handleDiskError(error: unknown): void {
@@ -778,14 +863,32 @@ export class VmManager {
     const enableShm = restore
       ? "shm" in restore.devices && restore.devices.shm !== undefined
       : sharedMemoryAvailable();
+    const enableGpu = restore
+      ? "gpu" in restore.devices && restore.devices.gpu !== undefined
+      : (distro === "debian" && this.#gpuEnabled);
+    const enableDisplay = restore
+      ? "display" in restore.devices && restore.devices.display !== undefined
+      : true;
+    const enableSound = restore
+      ? "sound" in restore.devices && restore.devices.sound !== undefined
+      : true;
+
+    if (enableSound && !this.#audioOut) {
+      this.#audioOut = createAudioOut({
+        onChange: (state) => {
+          this.#onAudioStateChange?.(state);
+          this.#onSessionsChange?.();
+        },
+      });
+    }
 
     const presentDevices: Record<DeviceKind, boolean> = {
-      display: false,
-      sound: false,
+      display: enableDisplay,
+      sound: enableSound,
       vsock: true,
       shm: enableShm,
       network: Boolean(netSpec),
-      gpu: false,
+      gpu: enableGpu,
     };
 
     if (restore) {
@@ -911,10 +1014,16 @@ export class VmManager {
       transferRestore: true,
       restore,
       distro: getGuestAssetUrl(image),
+      ...(restore ? {} : (distro === "debian" && enableShm ? { cmdline: "console=hvc0 rdinit=/init kw.wayland=1" } : {})),
       cpus,
       jit: true,
       vsock: true,
       shm: enableShm,
+      ...(enableDisplay ? { display: { width: 1280, height: 720 } } : {}),
+      ...(enableGpu ? { gpu: true, gl: true, vk: true } : {}),
+      ...(enableSound && this.#audioOut ? { sound: this.#audioOut } : {}),
+      onDisplay: (mode) => this.#handleDisplayMode(mode),
+      onInput: (state) => this.#handleInputState(state),
       commands: this.#commands,
       ...(effectiveMemory !== null ? { memoryMiB: effectiveMemory } : {}),
       memoryFallbackMiB: [...MEMORY_FALLBACK_MIB],
@@ -927,6 +1036,15 @@ export class VmManager {
       log: (m) => console.debug(m),
     });
     this.vm = vm;
+    this.#bootGpuEnabled = enableGpu;
+    this.#handleDisplayMode(null);
+    this.#handleInputState({ keyboard: false, mouse: false, tablet: false });
+    void vm.exited.then(() => {
+      if (this.vm === vm) {
+        this.#handleDisplayMode(null);
+        this.#handleInputState({ keyboard: false, mouse: false, tablet: false });
+      }
+    });
     this.#stopWasiServer();
     if (vm.vsock) {
       try {
@@ -1344,6 +1462,68 @@ export class VmManager {
     return written;
   }
 
+  async launchWaylandApp(
+    command: string,
+    args: readonly string[] = [],
+    opts?: { lodpi?: boolean },
+  ): Promise<void> {
+    if (!this.vm || this.#suspending) {
+      throw new Error("虚拟机尚未就绪");
+    }
+    if (this.activeDistro !== "debian") {
+      throw new Error("Wayland 桌面应用当前仅支持 Debian 发行版，请在控制中心切换为 Debian。");
+    }
+    const target = command.trim();
+    if (!target) {
+      throw new Error("请输入要启动的命令");
+    }
+    const res = await this.vm.exec(
+      "/bin/sh",
+      [
+        "-ec",
+        `
+        if [ ! -x /usr/lib/kw/bin/wland ]; then
+          echo "当前系统镜像缺少 /usr/lib/kw/bin/wland" >&2
+          exit 127
+        fi
+        if ! command -v "$1" >/dev/null 2>&1; then
+          echo "未找到命令: $1（可在终端或启动器安装桌面应用包）" >&2
+          exit 127
+        fi
+        lodpi_flag=$2
+        shift 2
+        if [ "$lodpi_flag" = "1" ]; then
+          lodpi_sock=""
+          for s in /run/user/*/wayland-0-lodpi; do
+            if [ -S "$s" ]; then
+              lodpi_sock=$s
+              if [ "\${s#/run/user/}" != "0/wayland-0-lodpi" ]; then
+                break
+              fi
+            fi
+          done
+          if [ -n "$lodpi_sock" ]; then
+            export WAYLAND_DISPLAY="$lodpi_sock"
+          fi
+        fi
+        setsid /usr/lib/kw/bin/wland "$@" </dev/null >/tmp/wland-app.log 2>&1 &
+        `,
+        "launch-wayland",
+        target,
+        opts?.lodpi ? "1" : "0",
+        ...args,
+      ],
+      {
+        user: "root",
+        cwd: this.currentCwd || "/workspace",
+        signal: AbortSignal.timeout(8000),
+      },
+    );
+    if (res.exitCode !== 0) {
+      throw new Error(res.stderr.trim() || res.stdout.trim() || `启动 ${target} 失败 (exit=${res.exitCode})`);
+    }
+  }
+
   async syncDisk(): Promise<boolean> {
     if (this.isSnapshotMode) return true;
     if (!this.vm || this.#suspending) return false;
@@ -1526,6 +1706,9 @@ export class VmManager {
         }),
       }).catch(async (error: unknown) => {
         if (bytes) await deleteSuspendedSession(distro, session.id).catch(() => {});
+        if (this.#bootGpuEnabled && error instanceof Error && /gpu|virtio|resource|context/i.test(error.message)) {
+          throw new Error("请先关闭运行中的 GPU 图形应用后再挂起会话", { cause: error });
+        }
         throw error;
       });
       if (heldWorker && !heldWorker.aborted) {
@@ -1541,6 +1724,8 @@ export class VmManager {
       this.#sessions = [];
       this.#activeSessionId = null;
       this.vm = null;
+      this.#handleDisplayMode(null);
+      this.#handleInputState({ keyboard: false, mouse: false, tablet: false });
       this.#onSessionsChange?.();
       if (!shown) {
         this.#onStatus({
@@ -1590,6 +1775,15 @@ export class VmManager {
       bytesWritten: number;
       inPlaceReads: number;
     };
+    gpu: {
+      enabled: boolean;
+      glState: string;
+      glRenderer: string | null;
+      vkState: string;
+      vkAdapter: string | null;
+      soundState: string;
+      muted: boolean;
+    };
   } {
     const stats = this.vm ? this.vm.stats() : null;
     let diskBlocks = 0;
@@ -1600,6 +1794,8 @@ export class VmManager {
     const wasiStats = this.#wasiServer?.stats;
     const shmClient = this.vm instanceof WorkerKernel ? this.vm.shm : undefined;
     const shmStats = shmClient?.stats ?? stats?.shm;
+    const glStatus = this.vm?.gl?.status;
+    const vkStatus = this.vm?.vk?.status;
     return {
       transport: this.vm?.transport ?? "unknown",
       cpus: this.#onlineCpuCount ?? stats?.cpus ?? null,
@@ -1624,6 +1820,15 @@ export class VmManager {
         bytesRead: shmStats?.bytesRead ?? 0,
         bytesWritten: shmStats?.bytesWritten ?? 0,
         inPlaceReads: shmStats?.inPlaceReads ?? 0,
+      },
+      gpu: {
+        enabled: Boolean(this.#bootGpuEnabled),
+        glState: glStatus?.state ?? "disabled",
+        glRenderer: glStatus?.what ?? glStatus?.webgl ?? null,
+        vkState: vkStatus?.state ?? "disabled",
+        vkAdapter: vkStatus?.adapter ?? null,
+        soundState: this.#audioOut ? this.#audioOut.state : "disabled",
+        muted: this.#audioOut?.muted ?? false,
       },
     };
   }

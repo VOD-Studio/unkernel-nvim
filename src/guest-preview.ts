@@ -32,35 +32,139 @@ async function previewBase(): Promise<URL> {
   return preview;
 }
 
-export class GuestPreview {
-  readonly #panel = document.querySelector<HTMLElement>("#guest-preview")!;
-  readonly #form = this.#panel.querySelector<HTMLFormElement>("form")!;
-  readonly #port = this.#form.querySelector<HTMLInputElement>("#guest-preview-port")!;
-  readonly #path = this.#form.querySelector<HTMLInputElement>("#guest-preview-path")!;
-  readonly #status = this.#panel.querySelector<HTMLElement>("#guest-preview-status")!;
-  readonly #frameArea = this.#panel.querySelector<HTMLElement>("#guest-preview-frame-area")!;
+export interface GuestPreviewPaneOptions {
+  root: HTMLElement;
+  getVm: () => KernelHandle | null;
+  showCloseButton?: boolean;
+  showNewWindowButton?: boolean;
+  initialPort?: number;
+  initialPath?: string;
+  onClose?: () => void;
+  onNewWindow?: () => void;
+  onTitleChange?: (title: string) => void;
+}
+
+/**
+ * Self-contained Guest port preview toolbar + status bar + isolated iframe relay,
+ * usable both in the fullscreen split-pane and inside floating desktop windows.
+ */
+export class GuestPreviewPane {
+  readonly #form: HTMLFormElement;
+  readonly #port: HTMLInputElement;
+  readonly #path: HTMLInputElement;
+  readonly #status: HTMLElement;
+  readonly #frameArea: HTMLElement;
   readonly #getVm: () => KernelHandle | null;
-  readonly #focusTerminal: () => void;
+  readonly #onTitleChange?: (title: string) => void;
+
   #connection: AbortController | null = null;
   #relay: GuestPreviewRelay | null = null;
+  #activePort: number | null = null;
+  #activePath = "/";
 
-  constructor(getVm: () => KernelHandle | null, focusTerminal: () => void) {
-    this.#getVm = getVm;
-    this.#focusTerminal = focusTerminal;
-    this.#port.value = localStorage.getItem(LAST_PORT) || "5173";
+  constructor(opts: GuestPreviewPaneOptions) {
+    this.#getVm = opts.getVm;
+    this.#onTitleChange = opts.onTitleChange;
+
+    const existingForm = opts.root.querySelector<HTMLFormElement>("form.guest-preview-toolbar");
+    if (existingForm) {
+      this.#form = existingForm;
+      this.#port = existingForm.querySelector<HTMLInputElement>("#guest-preview-port")!;
+      this.#path = existingForm.querySelector<HTMLInputElement>("#guest-preview-path")!;
+      this.#status = opts.root.querySelector<HTMLElement>(".guest-preview-status")!;
+      this.#frameArea = opts.root.querySelector<HTMLElement>(".guest-preview-frame-area")!;
+      existingForm.querySelector("#btn-close-preview")?.addEventListener("click", () => {
+        opts.onClose?.();
+      });
+    } else {
+      opts.root.replaceChildren();
+      this.#form = document.createElement("form");
+      this.#form.className = "guest-preview-toolbar";
+
+      const label = document.createElement("label");
+      label.textContent = "端口";
+
+      this.#port = document.createElement("input");
+      this.#port.className = "text-input";
+      this.#port.type = "number";
+      this.#port.min = "1";
+      this.#port.max = "65535";
+      this.#port.step = "1";
+      this.#port.inputMode = "numeric";
+      this.#port.required = true;
+      this.#port.setAttribute("aria-label", "端口");
+
+      this.#path = document.createElement("input");
+      this.#path.className = "text-input";
+      this.#path.type = "text";
+      this.#path.value = opts.initialPath || "/";
+      this.#path.spellcheck = false;
+      this.#path.setAttribute("aria-label", "路径");
+
+      const loadBtn = document.createElement("button");
+      loadBtn.className = "mini-btn active";
+      loadBtn.type = "submit";
+      loadBtn.textContent = "打开";
+
+      this.#form.append(label, this.#port, this.#path, loadBtn);
+
+      if (opts.showNewWindowButton) {
+        const newBtn = document.createElement("button");
+        newBtn.className = "mini-btn";
+        newBtn.type = "button";
+        newBtn.title = "新建预览窗口";
+        newBtn.textContent = "+";
+        newBtn.addEventListener("click", () => opts.onNewWindow?.());
+        this.#form.appendChild(newBtn);
+      }
+
+      if (opts.showCloseButton) {
+        const closeBtn = document.createElement("button");
+        closeBtn.className = "mini-btn";
+        closeBtn.type = "button";
+        closeBtn.textContent = "关闭";
+        closeBtn.addEventListener("click", () => opts.onClose?.());
+        this.#form.appendChild(closeBtn);
+      }
+
+      this.#status = document.createElement("div");
+      this.#status.className = "guest-preview-status";
+      this.#status.setAttribute("role", "status");
+      this.#status.textContent = "运行 guest Web 服务后，输入其端口。";
+
+      this.#frameArea = document.createElement("div");
+      this.#frameArea.className = "guest-preview-frame-area";
+
+      opts.root.append(this.#form, this.#status, this.#frameArea);
+    }
+
+    const defaultPort = opts.initialPort !== undefined
+      ? String(opts.initialPort)
+      : localStorage.getItem(LAST_PORT) || "5173";
+    this.#port.value = defaultPort;
+    if (opts.initialPath) {
+      this.#path.value = opts.initialPath;
+    }
+
     this.#form.addEventListener("submit", (event) => {
       event.preventDefault();
       void this.#navigate();
     });
-    this.#panel.querySelector("#btn-close-preview")!.addEventListener("click", () => {
-      this.close();
-      this.#focusTerminal();
-    });
   }
 
-  open(): void {
-    this.#panel.hidden = false;
-    document.body.classList.add("preview-open");
+  get port(): number | null {
+    return this.#activePort;
+  }
+
+  get path(): string {
+    return this.#activePath;
+  }
+
+  get title(): string {
+    return this.#activePort !== null ? `预览 :${this.#activePort}` : "Guest 端口预览";
+  }
+
+  focusPort(): void {
     this.#port.focus();
     this.#port.select();
   }
@@ -68,16 +172,19 @@ export class GuestPreview {
   openAt(port: number, path = "/"): void {
     this.#port.value = String(port);
     this.#path.value = path || "/";
-    this.#panel.hidden = false;
-    document.body.classList.add("preview-open");
     void this.#navigate();
   }
 
-  close(): void {
+  reset(): void {
     this.#disconnect();
-    this.#panel.hidden = true;
+    this.#activePort = null;
+    this.#activePath = "/";
     this.#status.textContent = "运行 guest Web 服务后，输入其端口。";
-    document.body.classList.remove("preview-open");
+    this.#onTitleChange?.(this.title);
+  }
+
+  dispose(): void {
+    this.#disconnect();
   }
 
   #disconnect(): void {
@@ -101,6 +208,9 @@ export class GuestPreview {
       return;
     }
     this.#disconnect();
+    this.#activePort = port;
+    this.#activePath = path;
+    this.#onTitleChange?.(this.title);
     this.#status.textContent = `正在连接 guest 端口 ${port}…`;
     this.#connection = new AbortController();
     const { signal } = this.#connection;
@@ -152,5 +262,53 @@ export class GuestPreview {
         this.#disconnect();
       }
     }
+  }
+}
+
+export class GuestPreview {
+  readonly #panel = document.querySelector<HTMLElement>("#guest-preview")!;
+  readonly #pane: GuestPreviewPane;
+  readonly #focusTerminal: () => void;
+
+  constructor(getVm: () => KernelHandle | null, focusTerminal: () => void) {
+    this.#focusTerminal = focusTerminal;
+    this.#pane = new GuestPreviewPane({
+      root: this.#panel,
+      getVm,
+      onClose: () => {
+        this.close();
+        this.#focusTerminal();
+      },
+    });
+  }
+
+  get isOpen(): boolean {
+    return !this.#panel.hidden;
+  }
+
+  get currentPort(): number | null {
+    return this.#pane.port;
+  }
+
+  get currentPath(): string {
+    return this.#pane.path;
+  }
+
+  open(): void {
+    this.#panel.hidden = false;
+    document.body.classList.add("preview-open");
+    this.#pane.focusPort();
+  }
+
+  openAt(port: number, path = "/"): void {
+    this.#panel.hidden = false;
+    document.body.classList.add("preview-open");
+    this.#pane.openAt(port, path);
+  }
+
+  close(): void {
+    this.#pane.reset();
+    this.#panel.hidden = true;
+    document.body.classList.remove("preview-open");
   }
 }

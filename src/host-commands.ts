@@ -25,8 +25,16 @@ export interface HostCommandDeps {
   pickUploadFiles: (signal: AbortSignal) => Promise<File[]>;
   mountDirectory: () => Promise<string>;
   listMounts: () => string[];
+  setDesktopMode?: (enabled: boolean) => void;
+  toggleDesktopMode?: () => void;
+  openLauncher?: () => void;
+  getDesktopStatus?: () => { desktopMode: boolean; waylandState: string; windowCount: number };
   notify?: (message: string) => void;
 }
+
+export type ParsedDesktopArgs =
+  | { action: "on" | "off" | "toggle" | "launcher" | "status" }
+  | { action: "error"; message: string };
 
 export type ParsedPreviewArgs =
   | { action: "open" }
@@ -137,6 +145,19 @@ export function parsePreviewArgs(args: readonly string[]): ParsedPreviewArgs {
     return { action: "error", message: `路径必须以单个 / 开头: ${path}` };
   }
   return { action: "navigate", port, path };
+}
+
+/** Parse arguments for the guest `desktop` host command. */
+export function parseDesktopArgs(args: readonly string[]): ParsedDesktopArgs {
+  const usage = "用法: desktop [on|off|toggle|launcher|status]";
+  if (args.length === 0) return { action: "toggle" };
+  if (args.length > 1) return { action: "error", message: usage };
+  const arg = args[0]!;
+  if (arg === "-h" || arg === "--help") return { action: "error", message: usage };
+  if (arg === "on" || arg === "off" || arg === "toggle" || arg === "launcher" || arg === "status") {
+    return { action: arg };
+  }
+  return { action: "error", message: `未知参数: ${arg}\n${usage}` };
 }
 
 /** Parse and validate an http/https URL for the guest `open` host command. */
@@ -392,6 +413,32 @@ export function createHostCommands(deps: HostCommandDeps): CommandsOption {
         await writeErr(ctx, `mount: ${errorMessage(err)}`);
         return 1;
       }
+    },
+
+    async desktop(ctx) {
+      const parsed = parseDesktopArgs(ctx.args);
+      if (parsed.action === "error") {
+        await writeErr(ctx, parsed.message);
+        return 2;
+      }
+      if (parsed.action === "status") {
+        const st = deps.getDesktopStatus?.() ?? { desktopMode: false, waylandState: "unknown", windowCount: 0 };
+        return `desktop=${st.desktopMode ? "on" : "off"} wayland=${st.waylandState} windows=${st.windowCount}\n`;
+      }
+      if (parsed.action === "launcher") {
+        deps.openLauncher?.();
+        return "已打开桌面应用启动器\n";
+      }
+      if (parsed.action === "on") {
+        deps.setDesktopMode?.(true);
+        return "已进入桌面环境\n";
+      }
+      if (parsed.action === "off") {
+        deps.setDesktopMode?.(false);
+        return "已返回全屏终端\n";
+      }
+      deps.toggleDesktopMode?.();
+      return "已切换桌面模式\n";
     },
   };
 }
