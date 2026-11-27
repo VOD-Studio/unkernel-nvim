@@ -104,9 +104,10 @@ describe("desktop-state", () => {
     for (const preset of DESKTOP_APP_PRESETS) {
       expect(packages).toEqual(expect.arrayContaining([...preset.debianPackages]));
     }
-    for (const pkg of ["xterm", "glmark2-es2-wayland", "xwayland", "libegl-mesa0", "zathura-pdf-poppler", "zip", "unzip"]) {
-      expect(packages).toContain(pkg);
-    }
+    expect(packages).toEqual(expect.arrayContaining([
+      "xterm", "glmark2-es2-wayland", "xwayland", "libegl-mesa0",
+      "zathura-pdf-poppler", "tumbler", "dbus-daemon", "zip", "unzip",
+    ]));
   });
 
   test("parseWaylandScale and formatWaylandScale handle auto, valid, and out-of-range values", () => {

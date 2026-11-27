@@ -47,7 +47,7 @@ import {
 } from "unkernel";
 import { BackgroundSuspend, backgroundSuspendEnabled, holdUntilShown } from "./background-suspend.ts";
 import { installDebianTools } from "./debian-tools.ts";
-import { GPU_ENABLED_STORAGE_KEY, parseStoredBoolean } from "./desktop-state.ts";
+import { DESKTOP_APP_PRESETS, GPU_ENABLED_STORAGE_KEY, parseStoredBoolean } from "./desktop-state.ts";
 import { DEFAULT_DISTRO, DISTROS, isDistro, releaseGuestAssetPath, type Distro } from "./distro.ts";
 import {
   KernelLogBuffer,
@@ -1477,6 +1477,7 @@ export class VmManager {
     if (!target) {
       throw new Error("请输入要启动的命令");
     }
+    const preset = DESKTOP_APP_PRESETS.find((app) => target === app.command || target === `/usr/bin/${app.command}`);
     const res = await this.vm.exec(
       "/bin/sh",
       [
@@ -1486,13 +1487,18 @@ export class VmManager {
           echo "当前系统镜像缺少 /usr/lib/kw/bin/wland" >&2
           exit 127
         fi
+        lodpi_flag=$1
+        needs_bus=$2
+        cd "$3" 2>/dev/null || cd /workspace
+        shift 3
         if ! command -v "$1" >/dev/null 2>&1; then
           echo "未找到命令: $1（可在终端或启动器安装桌面应用包）" >&2
           exit 127
         fi
-        app=$1
-        lodpi_flag=$2
-        shift 2
+        runtime_dir=/run/user/$(id -u)
+        if [ "$needs_bus" = 1 ] && [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && [ ! -S "$runtime_dir/bus" ]; then
+          set -- dbus-run-session -- "$@"
+        fi
         if [ "$lodpi_flag" = "1" ]; then
           lodpi_sock=""
           for s in /run/user/*/wayland-0-lodpi; do
@@ -1504,19 +1510,24 @@ export class VmManager {
             fi
           done
           if [ -n "$lodpi_sock" ]; then
-            export WAYLAND_DISPLAY="$lodpi_sock"
+            # Let wland resolve DISPLAY from the main relay before selecting the 1x socket.
+            set -- env "WAYLAND_DISPLAY=$lodpi_sock" "$@"
           fi
         fi
-        setsid /usr/lib/kw/bin/wland "$app" "$@" </dev/null >/tmp/wland-app.log 2>&1 &
+        log=/tmp/wland-app.log
+        if [ -w "$runtime_dir" ]; then log="$runtime_dir/wland-app.log"; fi
+        setsid /usr/lib/kw/bin/wland "$@" </dev/null >"$log" 2>&1 &
         `,
         "launch-wayland",
-        target,
         opts?.lodpi ? "1" : "0",
+        preset?.needsSessionBus ? "1" : "0",
+        this.currentCwd || "/workspace",
+        target,
         ...args,
       ],
       {
-        user: "root",
-        cwd: this.currentCwd || "/workspace",
+        // The distro's default login user owns the Xwayland display.
+        user: preset?.category === "x11" ? undefined : "root",
         signal: AbortSignal.timeout(8000),
       },
     );

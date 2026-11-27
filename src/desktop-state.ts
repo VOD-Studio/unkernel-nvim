@@ -45,6 +45,7 @@ export interface DesktopAppPreset {
   args: readonly string[];
   category: "terminal" | "files" | "editor" | "image" | "document" | "archive" | "calculator" | "graphics" | "x11";
   requiresGpu?: boolean;
+  needsSessionBus?: boolean;
   lodpi?: boolean;
   debianPackages: readonly string[];
 }
@@ -88,7 +89,8 @@ export const DESKTOP_APP_PRESETS: readonly DesktopAppPreset[] = [
     command: "ristretto",
     args: [],
     category: "image",
-    debianPackages: ["ristretto"],
+    needsSessionBus: true,
+    debianPackages: ["ristretto", "tumbler", "dbus-daemon"],
   },
   {
     id: "zathura",
