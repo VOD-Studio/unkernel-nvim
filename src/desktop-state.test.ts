@@ -8,6 +8,7 @@ import {
   computeCascadeRect,
   computeContextMenuPosition,
   computeDockMagnification,
+  DESKTOP_APP_PRESETS,
   formatAudioButtonState,
   formatWaylandScale,
   parseLauncherCommand,
@@ -96,13 +97,16 @@ describe("desktop-state", () => {
     });
   });
 
-  test("buildDebianDesktopInstallCommand installs core Wayland/X11 desktop packages", () => {
+  test("the recommended install covers every launcher preset and its file-format backends", () => {
     const cmd = buildDebianDesktopInstallCommand();
     expect(cmd).toContain("apt-get install");
-    expect(cmd).toContain("foot");
-    expect(cmd).toContain("pcmanfm");
-    expect(cmd).toContain("xwayland");
-    expect(cmd).toContain("libegl-mesa0");
+    const packages = cmd.split("--no-install-recommends ")[1]!.split(" ");
+    for (const preset of DESKTOP_APP_PRESETS) {
+      expect(packages).toEqual(expect.arrayContaining([...preset.debianPackages]));
+    }
+    for (const pkg of ["xterm", "glmark2-es2-wayland", "xwayland", "libegl-mesa0", "zathura-pdf-poppler", "zip", "unzip"]) {
+      expect(packages).toContain(pkg);
+    }
   });
 
   test("parseWaylandScale and formatWaylandScale handle auto, valid, and out-of-range values", () => {

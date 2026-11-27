@@ -2,7 +2,7 @@
 // Handcrafted inline SVG icon catalog and app-icon resolver for Desktop Mode
 // (dock tiles, App Launcher cards, and floating window titlebars).
 
-import type { DesktopAppPreset } from "./desktop-state.ts";
+import { DESKTOP_APP_PRESETS, type DesktopAppPreset } from "./desktop-state.ts";
 
 export type DesktopIconId =
   | "neovim"
@@ -14,6 +14,10 @@ export type DesktopIconId =
   | "fullscreen"
   | "files"
   | "editor"
+  | "image"
+  | "document"
+  | "archive"
+  | "calculator"
   | "graphics"
   | "x11"
   | "browser"
@@ -77,6 +81,26 @@ export const DESKTOP_ICONS: Readonly<Record<DesktopIconId, DesktopIconSpec>> = {
     label: "文本编辑器",
     svg: `${SVG_OPEN}<path d="M6 3.5H14.5L18.5 7.5V19.2C18.5 19.92 17.92 20.5 17.2 20.5H6C5.28 20.5 4.7 19.92 4.7 19.2V4.8C4.7 4.08 5.28 3.5 6 3.5Z" fill="#c8d4e6" fill-opacity="0.14" stroke="#c8d4e6" stroke-width="1.65" stroke-linejoin="round"/><path d="M14.2 3.7V7.8H18.3" stroke="#c8d4e6" stroke-opacity="0.75" stroke-width="1.4" stroke-linejoin="round"/><path d="M7.6 10.5H13.4M7.6 13.7H12M7.6 16.9H11.2" stroke="#c8d4e6" stroke-opacity="0.78" stroke-width="1.5" stroke-linecap="round"/><path d="M13.5 17.5L19.6 11.4L21.1 12.9L15 19L12.9 19.6L13.5 17.5Z" fill="#d97757"/></svg>`,
   },
+  image: {
+    id: "image",
+    label: "图片浏览器",
+    svg: `${SVG_OPEN}<rect x="2.8" y="4.2" width="18.4" height="15.6" rx="3.1" fill="#29483e" stroke="#98d8b6" stroke-width="1.5"/><circle cx="8" cy="9" r="1.8" fill="#f1d299"/><path d="m4.4 16 4.6-4.5 3.2 2.8 3.9-5 3.5 4.4v3.6c0 .6-.5 1-1.1 1H5.5c-.6 0-1.1-.4-1.1-1Z" fill="#87cba7"/></svg>`,
+  },
+  document: {
+    id: "document",
+    label: "PDF 阅读器",
+    svg: `${SVG_OPEN}<path d="M3 5.7c3.4-1.2 6.4-.9 9 1.1 2.6-2 5.6-2.3 9-1.1v12.6c-3.5-1.1-6.6-.6-9 1.3-2.4-1.9-5.5-2.4-9-1.3Z" fill="#d5a0ae" stroke="#ffd4dc" stroke-width="1.2" stroke-linejoin="round"/><path d="M12 7v12M5.6 8.3c1.5-.3 2.8-.1 4.2.6m-4.2 2c1.5-.3 2.8-.1 4.2.6" stroke="#784c5a" stroke-width="1.25" stroke-linecap="round"/><path d="M15.1 5.4v6.4l1.6-1.4 1.5.8V5Z" fill="#994d63"/></svg>`,
+  },
+  archive: {
+    id: "archive",
+    label: "压缩包管理器",
+    svg: `${SVG_OPEN}<path d="M4.7 8h14.6v10.3a2 2 0 0 1-2 2H6.7a2 2 0 0 1-2-2Z" fill="#979bd4"/><rect x="3" y="4.2" width="18" height="4.8" rx="1.4" fill="#c6c9f4"/><path d="M5.2 10h13.6" stroke="#626797" stroke-width="1.2"/><rect x="8.6" y="12.2" width="6.8" height="3" rx="1" fill="#4b507c"/><path d="M10.1 13.6h3.8" stroke="#dce0ff" stroke-width="1.2" stroke-linecap="round"/></svg>`,
+  },
+  calculator: {
+    id: "calculator",
+    label: "科学计算器",
+    svg: `${SVG_OPEN}<rect x="4.6" y="2.5" width="14.8" height="19" rx="2.8" fill="#409895" stroke="#a0e2d8" stroke-width="1.35"/><rect x="7" y="5.1" width="10" height="4.6" rx="1" fill="#cbefe2"/><path d="M7.7 12.8h1.6m2.4 0h1.6m-5.6 3.5h1.6m2.4 0h1.6" stroke="#c8f2e8" stroke-width="1.8" stroke-linecap="round"/><rect x="15.2" y="12" width="2" height="5.3" rx="1" fill="#163f42"/></svg>`,
+  },
   graphics: {
     id: "graphics",
     label: "3D 图形",
@@ -121,22 +145,9 @@ const MEDIA_PATTERN =
 
 /** Resolve a Launcher preset entry to its icon ID. */
 export function resolvePresetIcon(
-  preset: Pick<DesktopAppPreset, "id" | "command" | "category">,
+  preset: Pick<DesktopAppPreset, "category">,
 ): DesktopIconId {
-  switch (preset.category) {
-    case "terminal":
-      return "terminal";
-    case "files":
-      return "files";
-    case "editor":
-      return "editor";
-    case "graphics":
-      return "graphics";
-    case "x11":
-      return "x11";
-    default:
-      return resolveWaylandAppIcon(preset.command, preset.id);
-  }
+  return preset.category;
 }
 
 /** Resolve a running Wayland / Xwayland window to the best-matching icon ID. */
@@ -144,6 +155,9 @@ export function resolveWaylandAppIcon(
   appId?: string | null,
   title?: string | null,
 ): DesktopIconId {
+  const desktopId = appId?.toLowerCase().split(".").at(-1);
+  const preset = DESKTOP_APP_PRESETS.find((app) => app.id === desktopId || app.command === desktopId);
+  if (preset) return resolvePresetIcon(preset);
   const haystack = `${appId ?? ""} ${title ?? ""}`.toLowerCase();
   if (!haystack.trim()) return "wayland";
   if (NEOVIM_PATTERN.test(haystack)) return "neovim";

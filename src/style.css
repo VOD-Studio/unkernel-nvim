@@ -1338,6 +1338,22 @@ body.desktop-mode .terminal-win-bar:active,
   background: linear-gradient(155deg, #1c2430 0%, #141821 100%);
 }
 
+.app-icon-image {
+  background: linear-gradient(155deg, #253c31, #17261f);
+}
+
+.app-icon-document {
+  background: linear-gradient(155deg, #432d37, #281d25);
+}
+
+.app-icon-archive {
+  background: linear-gradient(155deg, #35364d, #222333);
+}
+
+.app-icon-calculator {
+  background: linear-gradient(155deg, #21403d, #182a2b);
+}
+
 .app-icon-graphics {
   background: linear-gradient(155deg, #241b33 0%, #161321 100%);
 }

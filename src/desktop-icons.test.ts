@@ -32,6 +32,10 @@ describe("desktop-icons", () => {
     expect(resolved.get("mousepad")).toBe("editor");
     expect(resolved.get("glmark2")).toBe("graphics");
     expect(resolved.get("xterm")).toBe("x11");
+    expect(resolved.get("ristretto")).toBe("image");
+    expect(resolved.get("zathura")).toBe("document");
+    expect(resolved.get("xarchiver")).toBe("archive");
+    expect(resolved.get("galculator")).toBe("calculator");
   });
 
   test("resolveWaylandAppIcon classifies common Linux apps and avoids false substring matches", () => {
@@ -44,6 +48,10 @@ describe("desktop-icons", () => {
     expect(resolveWaylandAppIcon("glmark2-es2-wayland", "glmark2")).toBe("graphics");
     expect(resolveWaylandAppIcon("org.mozilla.firefox", "Firefox")).toBe("browser");
     expect(resolveWaylandAppIcon("mpv", "video.mp4")).toBe("media");
+    expect(resolveWaylandAppIcon("org.pwmt.zathura", "code.pdf")).toBe("document");
+    expect(resolveWaylandAppIcon("org.xfce.ristretto", "map.png")).toBe("image");
+    expect(resolveWaylandAppIcon("xarchiver", "workspace.zip")).toBe("archive");
+    expect(resolveWaylandAppIcon("galculator")).toBe("calculator");
 
     // Must not falsely match "st" inside "weston" as a terminal
     expect(resolveWaylandAppIcon("weston-flower", "Flower")).toBe("wayland");

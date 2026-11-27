@@ -42,10 +42,10 @@ export interface DesktopAppPreset {
   description: string;
   command: string;
   args: readonly string[];
-  category: "terminal" | "files" | "editor" | "graphics" | "x11";
+  category: "terminal" | "files" | "editor" | "image" | "document" | "archive" | "calculator" | "graphics" | "x11";
   requiresGpu?: boolean;
   lodpi?: boolean;
-  debianPackage: string;
+  debianPackages: readonly string[];
 }
 
 export const DESKTOP_APP_PRESETS: readonly DesktopAppPreset[] = [
@@ -56,7 +56,7 @@ export const DESKTOP_APP_PRESETS: readonly DesktopAppPreset[] = [
     command: "foot",
     args: [],
     category: "terminal",
-    debianPackage: "foot",
+    debianPackages: ["foot"],
   },
   {
     id: "pcmanfm",
@@ -65,7 +65,7 @@ export const DESKTOP_APP_PRESETS: readonly DesktopAppPreset[] = [
     command: "pcmanfm",
     args: ["/workspace"],
     category: "files",
-    debianPackage: "pcmanfm",
+    debianPackages: ["pcmanfm"],
   },
   {
     id: "mousepad",
@@ -74,7 +74,43 @@ export const DESKTOP_APP_PRESETS: readonly DesktopAppPreset[] = [
     command: "mousepad",
     args: [],
     category: "editor",
-    debianPackage: "mousepad",
+    debianPackages: ["mousepad"],
+  },
+  {
+    id: "ristretto",
+    name: "Ristretto",
+    description: "图片浏览器",
+    command: "ristretto",
+    args: [],
+    category: "image",
+    debianPackages: ["ristretto"],
+  },
+  {
+    id: "zathura",
+    name: "Zathura",
+    description: "Vim 键位 PDF 阅读器",
+    command: "zathura",
+    args: [],
+    category: "document",
+    debianPackages: ["zathura", "zathura-pdf-poppler"],
+  },
+  {
+    id: "xarchiver",
+    name: "Xarchiver",
+    description: "压缩与解压文件",
+    command: "xarchiver",
+    args: [],
+    category: "archive",
+    debianPackages: ["xarchiver", "zip", "unzip"],
+  },
+  {
+    id: "galculator",
+    name: "Galculator",
+    description: "科学计算器",
+    command: "galculator",
+    args: [],
+    category: "calculator",
+    debianPackages: ["galculator"],
   },
   {
     id: "glmark2",
@@ -84,7 +120,7 @@ export const DESKTOP_APP_PRESETS: readonly DesktopAppPreset[] = [
     args: [],
     category: "graphics",
     requiresGpu: true,
-    debianPackage: "glmark2-es2-wayland",
+    debianPackages: ["glmark2-es2-wayland"],
   },
   {
     id: "xterm",
@@ -94,7 +130,7 @@ export const DESKTOP_APP_PRESETS: readonly DesktopAppPreset[] = [
     args: [],
     category: "x11",
     lodpi: true,
-    debianPackage: "xterm",
+    debianPackages: ["xterm", "xfonts-base"],
   },
 ];
 
@@ -322,10 +358,12 @@ export function parseLauncherCommand(raw: string): { file: string; args: string[
 }
 
 export function buildDebianDesktopInstallCommand(): string {
+  const packages = DESKTOP_APP_PRESETS.flatMap((preset) => preset.debianPackages);
   return (
     "env DEBIAN_FRONTEND=noninteractive apt-get update && " +
     "env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends " +
-    "foot fonts-dejavu-core fonts-noto-cjk pcmanfm mousepad xwayland mesa-utils libegl1 libegl-mesa0 libgles2"
+    "fonts-dejavu-core fonts-noto-cjk xwayland mesa-utils libegl1 libegl-mesa0 libgles2 " +
+    packages.join(" ")
   );
 }
 
