@@ -189,7 +189,7 @@ function switchToSession(id: string): void {
 
 async function openNewSession(
   mode: SessionMode,
-  opts?: { cwd?: string; replaceActive?: boolean; startup?: boolean },
+  opts?: { cwd?: string; replaceActive?: boolean; startup?: boolean; shellCommand?: string },
 ): Promise<void> {
   const replaceSessionId = opts?.replaceActive ? (vmManager.activeSessionId ?? undefined) : undefined;
   const session = await vmManager.openSession(mode, terminal.getSize(), opts?.cwd, {
@@ -201,6 +201,10 @@ async function openNewSession(
   renderSessionHud();
   desktopShell?.renderStatus();
   if (active && !modal?.isOpen && !desktopShell?.isOverlayOpen) terminal.focus();
+  if (opts?.shellCommand) {
+    if (!session.pty) throw new Error("安装用的 Shell 会话已结束");
+    await session.pty.write(`${opts.shellCommand}\n`);
+  }
 }
 
 async function closeSessionTab(id: string): Promise<void> {
@@ -310,10 +314,7 @@ desktopShell = new DesktopShell({
   isModalOpen: () => Boolean(modal?.isOpen),
   onOpenModal: () => modal?.open(),
   onOpenSession: (mode) => openNewSession(mode),
-  onOpenInstallInShell: async (command) => {
-    await openNewSession("shell", { cwd: "/workspace" });
-    await vmManager.activePty?.write(`${command}\n`);
-  },
+  onOpenInstallInShell: (shellCommand) => openNewSession("shell", { cwd: "/workspace", shellCommand }),
   onDesktopModeChange: (enabled) => {
     if (enabled && preview.isOpen) {
       const port = preview.currentPort;

@@ -59,7 +59,7 @@ export const DESKTOP_APP_PRESETS: readonly DesktopAppPreset[] = [
     command: "foot",
     args: [],
     category: "terminal",
-    debianPackages: ["foot"],
+    debianPackages: ["foot", "fonts-dejavu-core"],
   },
   {
     id: "pcmanfm",
@@ -131,7 +131,7 @@ export const DESKTOP_APP_PRESETS: readonly DesktopAppPreset[] = [
     args: [],
     category: "graphics",
     requiresGpu: true,
-    debianPackages: ["glmark2-es2-wayland"],
+    debianPackages: ["glmark2-es2-wayland", "libegl1", "libegl-mesa0", "libgles2"],
   },
   {
     id: "xterm",
@@ -142,7 +142,7 @@ export const DESKTOP_APP_PRESETS: readonly DesktopAppPreset[] = [
     args: [],
     category: "x11",
     lodpi: true,
-    debianPackages: ["xterm", "xfonts-base"],
+    debianPackages: ["xterm", "xfonts-base", "xwayland"],
   },
 ];
 
@@ -369,12 +369,15 @@ export function parseLauncherCommand(raw: string): { file: string; args: string[
   return { file: tokens[0]!, args: tokens.slice(1) };
 }
 
-export function buildDebianDesktopInstallCommand(): string {
-  const packages = DESKTOP_APP_PRESETS.flatMap((preset) => preset.debianPackages);
+export function buildDebianDesktopInstallCommand(preset?: DesktopAppPreset): string {
+  const packages = preset?.debianPackages ?? [
+    "fonts-noto-cjk",
+    "mesa-utils",
+    ...DESKTOP_APP_PRESETS.flatMap((app) => app.debianPackages),
+  ];
   return (
     "env DEBIAN_FRONTEND=noninteractive apt-get update && " +
     "env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends " +
-    "fonts-dejavu-core fonts-noto-cjk xwayland mesa-utils libegl1 libegl-mesa0 libgles2 " +
     packages.join(" ")
   );
 }

@@ -34,6 +34,7 @@ import {
   WIN_EDGE_LEFT,
   WIN_EDGE_RIGHT,
   WIN_EDGE_TOP,
+  type DesktopAppPreset,
   type DesktopBounds,
   type WindowRect,
 } from "./desktop-state.ts";
@@ -1154,16 +1155,18 @@ export class DesktopShell {
       this.setWaylandLodpi(this.#launcherLodpiEl.checked);
     });
 
-    this.#launcherInstallBtn.addEventListener("click", () => {
-      if (this.#vmManager.activeDistro !== "debian") {
-        this.#toast("请先在控制中心将发行版切换为 Debian");
-        return;
-      }
-      this.closeLauncher();
-      this.#raiseTerminalWindow(true);
-      void this.#onOpenInstallInShell(buildDebianDesktopInstallCommand()).catch((err) => {
-        this.#toast(err instanceof Error ? err.message : String(err), 5000);
-      });
+    this.#launcherInstallBtn.addEventListener("click", () => this.#installLauncherApps());
+  }
+
+  #installLauncherApps(preset?: DesktopAppPreset): void {
+    if (this.#vmManager.activeDistro !== "debian") {
+      this.#toast("请先在控制中心将发行版切换为 Debian");
+      return;
+    }
+    this.closeLauncher();
+    this.#raiseTerminalWindow(true);
+    void this.#onOpenInstallInShell(buildDebianDesktopInstallCommand(preset)).catch((err) => {
+      this.#toast(err instanceof Error ? err.message : String(err), 5000);
     });
   }
 
@@ -1186,9 +1189,12 @@ export class DesktopShell {
     const group = this.#launcherFiltersEl.querySelector<HTMLInputElement>("input:checked")!.value;
     const presets = DESKTOP_APP_PRESETS.filter((preset) => group === "全部" || preset.group === group);
     const cards = presets.map((preset) => {
+      const card = document.createElement("div");
+      card.className = "launcher-card";
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.className = "launcher-card";
+      btn.className = "launcher-card-launch";
+      btn.setAttribute("aria-label", `启动 ${preset.name}`);
       const lodpi = Boolean(preset.lodpi || this.#waylandLodpi);
       btn.title = [lodpi ? "wland-lodpi" : "wland", preset.command, ...preset.args].join(" ");
       const meta = document.createElement("span");
@@ -1209,7 +1215,16 @@ export class DesktopShell {
       btn.addEventListener("click", () => {
         void this.#launchCommand(preset.command, preset.args, lodpi);
       });
-      return btn;
+
+      const install = document.createElement("button");
+      install.type = "button";
+      install.className = "launcher-card-install";
+      install.textContent = "安装";
+      install.setAttribute("aria-label", `安装 ${preset.name}`);
+      install.title = `安装 ${preset.debianPackages.join(" ")}（需 Wisp 联网）`;
+      install.addEventListener("click", () => this.#installLauncherApps(preset));
+      card.append(btn, install);
+      return card;
     });
     this.#launcherGridEl.replaceChildren(...cards);
     this.#launcherCountEl.textContent = `${cards.length} 个应用`;

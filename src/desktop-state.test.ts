@@ -97,6 +97,19 @@ describe("desktop-state", () => {
     });
   });
 
+  test.each([
+    ["ristretto", ["ristretto", "tumbler", "dbus-daemon"]],
+    ["foot", ["foot", "fonts-dejavu-core"]],
+    ["xterm", ["xterm", "xfonts-base", "xwayland"]],
+    ["glmark2", ["glmark2-es2-wayland", "libegl1", "libegl-mesa0", "libgles2"]],
+    ["galculator", ["galculator"]],
+  ] as const)("installing %s requests only that app and its runtime packages", (id, expected) => {
+    const preset = DESKTOP_APP_PRESETS.find((app) => app.id === id)!;
+    const cmd = buildDebianDesktopInstallCommand(preset);
+    const packages = cmd.split("--no-install-recommends ")[1]!.split(" ");
+    expect(new Set(packages)).toEqual(new Set(expected));
+  });
+
   test("the recommended install covers every launcher preset and its file-format backends", () => {
     const cmd = buildDebianDesktopInstallCommand();
     expect(cmd).toContain("apt-get install");
@@ -105,7 +118,7 @@ describe("desktop-state", () => {
       expect(packages).toEqual(expect.arrayContaining([...preset.debianPackages]));
     }
     expect(packages).toEqual(expect.arrayContaining([
-      "xterm", "glmark2-es2-wayland", "xwayland", "libegl-mesa0",
+      "xterm", "glmark2-es2-wayland", "xwayland", "libegl-mesa0", "fonts-noto-cjk", "mesa-utils",
       "zathura-pdf-poppler", "tumbler", "dbus-daemon", "zip", "unzip",
     ]));
   });

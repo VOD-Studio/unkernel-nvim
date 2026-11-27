@@ -1497,7 +1497,7 @@ export class VmManager {
         cd "$3" 2>/dev/null || cd /workspace
         shift 3
         if ! command -v "$1" >/dev/null 2>&1; then
-          echo "未找到命令: $1（可在终端或启动器安装桌面应用包）" >&2
+          echo "未找到命令: $1（${preset ? "请点击对应应用卡片上的「安装」" : "请在 Debian 终端安装对应软件包"}）" >&2
           exit 127
         fi
         runtime_dir=/run/user/$(id -u)
