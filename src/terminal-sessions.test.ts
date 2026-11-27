@@ -7,6 +7,8 @@ import {
   nextSessionTitle,
   pickNextActiveSessionId,
   reconcileRestoredSessions,
+  shouldReturnToShell,
+  STARTUP_SESSION_ID,
   type SuspendedTerminalEntry,
   type TerminalSessionRecord,
 } from "./terminal-sessions.ts";
@@ -22,6 +24,18 @@ function makeRecord(overrides: Partial<TerminalSessionRecord> & { id: string }):
 }
 
 describe("terminal-sessions", () => {
+  test("only an exiting startup editor returns to a shell", () => {
+    const startup = makeRecord({ id: STARTUP_SESSION_ID, mode: "nvim" });
+    const exit = { type: "exit", code: 0 } as const;
+    expect(shouldReturnToShell(startup, exit)).toBe(true);
+    expect(shouldReturnToShell(startup, { type: "signal", signal: 15, coreDumped: false })).toBe(true);
+    expect(shouldReturnToShell({ ...startup, id: "restored-1" }, exit)).toBe(true);
+    expect(shouldReturnToShell({ ...startup, id: "pty-2" }, exit)).toBe(false);
+    expect(shouldReturnToShell({ ...startup, mode: "shell" }, exit)).toBe(false);
+    expect(shouldReturnToShell(startup, { type: "closed" })).toBe(false);
+    expect(shouldReturnToShell(startup, { type: "lost" })).toBe(false);
+  });
+
   test("nextSessionTitle numbers duplicate titles per mode", () => {
     const existing: TerminalSessionRecord[] = [];
     expect(nextSessionTitle("nvim", "fish", existing)).toBe("nvim");

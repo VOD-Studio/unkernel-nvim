@@ -28,7 +28,7 @@ bun run prebake
 bun run dev
 ```
 
-浏览器访问 `http://localhost:5173` 即可进入全屏 Neovim 环境，默认自动通过同源 `/wisp` 联网。
+浏览器访问 `http://localhost:5173` 即可进入全屏 Neovim 环境，默认自动通过同源 `/wisp` 联网。在启动时打开的 Neovim 中执行 `:q` 退出后，原标签会显示 `/workspace` 下的 Shell 提示符。输入 `nvim` 可再次打开编辑器。
 
 ### 切换发行版
 

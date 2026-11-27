@@ -107,6 +107,7 @@ import {
 } from "./suspended-session.ts";
 import {
   MAX_TERMINAL_SESSIONS,
+  STARTUP_SESSION_ID,
   nextSessionTitle,
   pickNextActiveSessionId,
   reconcileRestoredSessions,
@@ -238,7 +239,7 @@ export class VmManager {
   vm: KernelHandle | null = null;
   #sessions: TerminalSession[] = [];
   #activeSessionId: string | null = null;
-  #nextSessionSeq = 1;
+  #nextSessionSeq = 2;
   mountedFolders: Map<string, MountedFolder> = new Map();
   wispUrl: string = localStorage.getItem("unkernel-nvim.wisp") ?? "";
   netMode: NetMode = loadInitialNetMode(this.wispUrl);
@@ -810,7 +811,7 @@ export class VmManager {
       if (entries.length > 0 || saved.terminalId) {
         this.#onNotice?.("虚拟机已恢复。原终端已结束，正在打开新会话。");
       }
-      const fallback = await this.openSession(saved.mode, size, saved.cwd);
+      const fallback = await this.openSession(saved.mode, size, saved.cwd, { startup: true });
       return [fallback];
     } catch (err) {
       this.#stopWasiServer();
@@ -1218,28 +1219,27 @@ export class VmManager {
     mode: SessionMode,
     size: { cols: number; rows: number; xpixel?: number; ypixel?: number },
     targetPath?: string,
-    opts?: { replaceSessionId?: string; title?: string },
+    opts?: { replaceSessionId?: string; title?: string; startup?: boolean },
   ): Promise<TerminalSession> {
-    if (!this.vm || this.#suspending) throw new Error("虚拟机当前无法打开终端");
-    const replaceIdx = opts?.replaceSessionId
-      ? this.#sessions.findIndex((s) => s.id === opts.replaceSessionId)
-      : -1;
-    if (replaceIdx === -1 && this.#sessions.length >= MAX_TERMINAL_SESSIONS) {
+    const vm = this.vm;
+    if (!vm || this.#suspending) throw new Error("虚拟机当前无法打开终端");
+    const previous = this.#sessions.find((s) => s.id === opts?.replaceSessionId);
+    if (opts?.replaceSessionId && !previous) throw new Error("终端标签已关闭");
+    if (!previous && this.#sessions.length >= MAX_TERMINAL_SESSIONS) {
       throw new Error(`最多同时保留 ${MAX_TERMINAL_SESSIONS} 个终端会话，请先关闭其他标签页`);
     }
 
-    if (replaceIdx >= 0) {
-      const prev = this.#sessions[replaceIdx]!;
-      const prevPty = prev.pty;
-      prev.pty = null;
-      prev.exited = true;
+    const cwd = targetPath ?? previous?.cwd ?? this.currentCwd;
+    if (previous) {
+      const prevPty = previous.pty;
+      previous.pty = null;
+      previous.exited = true;
       if (prevPty) {
         await prevPty.close().catch(() => {});
       }
     }
 
-    const cwd = targetPath ?? this.currentCwd;
-    const resolvedShell = await this.#resolveShell(this.vm);
+    const resolvedShell = await this.#resolveShell(vm);
 
     this.#onStatus({
       phase: "userspace",
@@ -1248,7 +1248,7 @@ export class VmManager {
     });
 
     const spawnSession = (file: string, args: string[], shellEnv: string) =>
-      this.vm!.spawn(file, args, {
+      vm.spawn(file, args, {
         user: "root",
         detachable: true,
         cols: size.cols,
@@ -1270,19 +1270,26 @@ export class VmManager {
       });
 
     const throwDistroBootErrorIfBase = async (err: unknown): Promise<never> => {
-      const message = this.vm ? await this.#distroBootError(this.vm) : null;
+      const message = this.vm === vm ? await this.#distroBootError(vm) : null;
       if (message) throw new Error(message, { cause: err });
       throw err;
     };
 
-    const register = (pty: Pty) =>
-      this.#registerSession(pty, mode, cwd, {
-        id: replaceIdx >= 0 ? this.#sessions[replaceIdx]!.id : undefined,
+    const register = async (pty: Pty) => {
+      // A tab may have been closed, moved, or replaced while its new PTY was starting.
+      const replaceIndex = previous ? this.#sessions.indexOf(previous) : undefined;
+      if (replaceIndex === -1 || this.vm !== vm || this.#suspending) {
+        await pty.close().catch(() => {});
+        throw new Error("终端会话已变更");
+      }
+      return this.#registerSession(pty, mode, cwd, {
+        id: previous?.id ?? (opts?.startup ? STARTUP_SESSION_ID : undefined),
         title: opts?.title,
-        replaceIndex: replaceIdx >= 0 ? replaceIdx : undefined,
-        activate: true,
+        replaceIndex,
+        activate: !previous || this.#activeSessionId === previous.id,
         ready: true,
       });
+    };
 
     if (mode === "nvim") {
       try {
@@ -1376,10 +1383,8 @@ export class VmManager {
       },
     );
 
-    if (opts.activate) {
-      this.#onSessionsChange?.();
-    }
     if (opts.ready) {
+      this.#onSessionsChange?.();
       this.#reportReady();
     }
     return session;

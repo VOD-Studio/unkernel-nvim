@@ -17,7 +17,12 @@ import {
 import { ModalController } from "./modal.ts";
 import { ResumeSessionError } from "./suspended-session.ts";
 import { CanvasTerminal, SHELL_SCROLLBACK_LINES } from "./terminal.ts";
-import { cycleSessionId, MAX_TERMINAL_SESSIONS, type SessionMode } from "./terminal-sessions.ts";
+import {
+  cycleSessionId,
+  MAX_TERMINAL_SESSIONS,
+  shouldReturnToShell,
+  type SessionMode,
+} from "./terminal-sessions.ts";
 import { DiskLockError, VmManager, type BootStatusUpdate, type TerminalSession } from "./vm-manager.ts";
 
 const stageEl = document.getElementById("terminal-stage")!;
@@ -184,16 +189,18 @@ function switchToSession(id: string): void {
 
 async function openNewSession(
   mode: SessionMode,
-  opts?: { cwd?: string; replaceActive?: boolean },
+  opts?: { cwd?: string; replaceActive?: boolean; startup?: boolean },
 ): Promise<void> {
   const replaceSessionId = opts?.replaceActive ? (vmManager.activeSessionId ?? undefined) : undefined;
   const session = await vmManager.openSession(mode, terminal.getSize(), opts?.cwd, {
     replaceSessionId,
+    startup: opts?.startup,
   });
-  mountSession(session, true);
+  const active = vmManager.activeSession === session;
+  mountSession(session, active);
   renderSessionHud();
   desktopShell?.renderStatus();
-  if (!modal?.isOpen && !desktopShell?.isOverlayOpen) terminal.focus();
+  if (active && !modal?.isOpen && !desktopShell?.isOverlayOpen) terminal.focus();
 }
 
 async function closeSessionTab(id: string): Promise<void> {
@@ -274,15 +281,22 @@ const vmManager = new VmManager({
     desktopShell?.renderStatus();
     if (modal?.isOpen) modal.render();
   },
-  onSessionExit: (session) => {
-    renderSessionHud();
-    if (modal?.isOpen) modal.render();
-    showToast(
-      session.mode === "nvim"
-        ? `${session.title} 已退出`
-        : `${session.title} 会话已结束`,
-    );
-    if (vmManager.activeSessionId === session.id && vmManager.sessions.length === 1) {
+  onSessionExit: async (session, end) => {
+    let message = session.mode === "nvim" ? `${session.title} 已退出` : `${session.title} 会话已结束`;
+    if (shouldReturnToShell(session, end)) {
+      try {
+        const shell = await vmManager.openSession("shell", terminal.getSize(), session.cwd, {
+          replaceSessionId: session.id,
+        });
+        mountSession(shell, vmManager.activeSession === shell);
+        return;
+      } catch (err) {
+        if (!vmManager.sessions.includes(session)) return;
+        message = `启动 Shell 失败：${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    showToast(message);
+    if (vmManager.activeSession === session && vmManager.sessions.length === 1) {
       modal?.open("workspace");
     }
   },
@@ -461,7 +475,7 @@ async function bootApp(diskMode?: DiskMode): Promise<void> {
       }
       renderSessionHud();
     } else {
-      await openNewSession("nvim", { cwd: "/workspace" });
+      await openNewSession("nvim", { cwd: "/workspace", startup: true });
     }
     if (vmManager.isSnapshotMode) {
       const notice = vmManager.diskNotice;

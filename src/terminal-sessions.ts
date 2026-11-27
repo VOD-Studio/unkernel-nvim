@@ -2,7 +2,12 @@
 // Pure session state helpers for concurrent multi-PTY terminal tabs and
 // multi-TTY suspend/restore reconciliation.
 
+import type { PtyEnd } from "unkernel";
+
 export const MAX_TERMINAL_SESSIONS = 9;
+// Cold boots have always assigned the first Neovim tab this ID. Reserve it across restores.
+export const STARTUP_SESSION_ID = "pty-1";
+const LEGACY_SINGLE_SESSION_ID = "restored-1";
 
 export type SessionMode = "nvim" | "shell";
 
@@ -22,6 +27,11 @@ export interface SuspendedTerminalEntry {
   title: string;
   cwd: string;
   terminalId: string;
+}
+
+export function shouldReturnToShell(session: TerminalSessionRecord, end: PtyEnd): boolean {
+  const startup = session.id === STARTUP_SESSION_ID || session.id === LEGACY_SINGLE_SESSION_ID;
+  return startup && session.mode === "nvim" && (end.type === "exit" || end.type === "signal");
 }
 
 /** Generate a unique human-readable tab title such as "nvim", "fish", or "fish #2". */
@@ -89,7 +99,7 @@ export function reconcileRestoredSessions(
   if (fallback.terminalId && (!validIds || validIds.has(fallback.terminalId))) {
     return [
       {
-        id: "restored-1",
+        id: LEGACY_SINGLE_SESSION_ID,
         mode: fallback.mode,
         title: fallback.mode === "nvim" ? "nvim" : "shell",
         cwd: fallback.cwd,
